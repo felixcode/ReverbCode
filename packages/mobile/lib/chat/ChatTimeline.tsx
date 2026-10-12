@@ -1,0 +1,1103 @@
+import { Feather } from "../icons";
+import * as Clipboard from "expo-clipboard";
+import * as Linking from "expo-linking";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+	ActivityIndicator,
+	FlatList,
+	Image,
+	Modal,
+	Pressable,
+	ScrollView,
+	StyleSheet,
+	Switch,
+	Text,
+	TextInput,
+	View,
+	useWindowDimensions,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { authHeaders, httpBase } from "../config";
+import { haptics } from "../haptics";
+import { useApp } from "../store";
+import type { Theme } from "../theme";
+import { useTheme, useThemedStyles } from "../ThemeProvider";
+import { MascotLamp } from "../ui";
+import { ChatMarkdown } from "./ChatMarkdown";
+import { HighlightedCodeText } from "./HighlightedCodeText";
+import { caretNotation, commandOutputText } from "./ansi";
+import { jumpToLatestColors, userMessageSurfaceStyle } from "./chatChrome";
+import { actionControlWidth, requestPresentation } from "./chatPresentation";
+import { workingElapsedLabel } from "./conversationChrome";
+import { errorActivityDuplicatesTurn, providerErrorCopy } from "./providerError";
+import { ElicitationAction, ElicitationChoiceList, ElicitationTextField } from "./elicitation-native-controls";
+import {
+	elicitationPromptCopy,
+	elicitationStepPresentation,
+	groupedQuestionInputs,
+	humanizeInputName,
+	initialInputValue,
+	inputOptions,
+	missingRequiredInputs,
+	safeHttpURL,
+	toggleInputValue,
+	validateInput,
+} from "./elicitationModel";
+import { previewFilePath } from "../api";
+import { attachmentName, attachmentTileSize, isImageAttachment, isSameAttachmentLoad, stagedAttachmentParts, type AttachmentImageSource } from "./messageAttachments";
+import type {
+	ConversationActivity,
+	ConversationItem,
+	ConversationSnapshot,
+	ConversationTurn,
+	FileChange,
+	InputProperty,
+} from "./types";
+import {
+	activityHierarchy,
+	activityNodesRunning,
+	activityStartsExpanded,
+	canRollbackTurn,
+	conversationTimelineRenderPlan,
+	countActivityNodes,
+	readableConversationItems,
+	type ActivityNode,
+	type ConversationGroup,
+} from "./timelineModel";
+import { type, space } from "../tokens";
+import { userFacingError } from "../connectionError";
+
+type TimelineRow =
+	| { kind: "single"; key: string; items: [ConversationItem] }
+	| { kind: "activities"; key: string; items: ConversationActivity[] };
+
+export const ChatTimeline = memo(function ChatTimeline({
+	snapshot,
+	loadingOlder,
+	onLoadOlder,
+	approvalPending,
+	inputPending,
+	onDecide,
+	onResolveInput,
+	onRollback,
+	jumpToSequence,
+	onJumpHandled,
+	answeredBelow,
+}: {
+	snapshot: ConversationSnapshot;
+	loadingOlder: boolean;
+	onLoadOlder(): void;
+	approvalPending: boolean;
+	inputPending: boolean;
+	onDecide(requestId: string, decisionId: string): Promise<void>;
+	onResolveInput(requestId: string, action: "accept" | "decline" | "cancel", content?: Record<string, unknown>): Promise<void>;
+	onRollback?(turnId: string): Promise<number>;
+	jumpToSequence?: number;
+	onJumpHandled?(): void;
+	/**
+	 * The request the composer is currently answering. Its card here collapses to
+	 * a record of what was asked, so the same decision never has two live sets of
+	 * controls that could disagree.
+	 */
+	answeredBelow?: number;
+}) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const listRef = useRef<FlatList<ConversationGroup>>(null);
+	const followsTail = useRef(true);
+	const [showJump, setShowJump] = useState(false);
+	// Usage is snapshot state, not conversation. Reasoning stays available in the
+	// durable record but hidden on mobile: prose and work are the primary surface.
+	const items = useMemo(() => readableConversationItems(snapshot), [snapshot]);
+	const plan = useMemo(() => conversationTimelineRenderPlan(snapshot, items), [items, snapshot.turns]);
+	const groups = plan.groups;
+
+	useEffect(() => {
+		if (jumpToSequence === undefined) return;
+		// Match the group that CONTAINS the sequence, not one whose anchor equals
+		// it: a group's anchor is its first item, so an activity partway through a
+		// turn never matched and the jump silently did nothing.
+		const index = groups.findIndex((group) => group.anchor === jumpToSequence || group.items.some((item) => item.sequence === jumpToSequence));
+		if (index >= 0) {
+			followsTail.current = index === 0;
+			setShowJump(!followsTail.current);
+			requestAnimationFrame(() => listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.82 }));
+		}
+		onJumpHandled?.();
+	}, [groups, jumpToSequence, onJumpHandled]);
+
+	if (plan.kind === "empty") {
+		return (
+			<View style={styles.timelineWrap}>
+				<View style={styles.emptySurface}>
+					<EmptyConversation controller={snapshot.controller.state} />
+				</View>
+			</View>
+		);
+	}
+
+	return (
+		<View style={styles.timelineWrap}>
+			<FlatList<ConversationGroup>
+				ref={listRef}
+				data={groups}
+				inverted={plan.inverted}
+				keyExtractor={(group) => group.key}
+				style={styles.list}
+				contentContainerStyle={styles.content}
+				keyboardShouldPersistTaps="handled"
+				initialNumToRender={4}
+				maxToRenderPerBatch={4}
+				updateCellsBatchingPeriod={32}
+				windowSize={5}
+				maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+				onScroll={(event) => {
+					const { contentOffset } = event.nativeEvent;
+					followsTail.current = Math.abs(contentOffset.y) < 120;
+					setShowJump(!followsTail.current);
+				}}
+				scrollEventThrottle={100}
+				onContentSizeChange={() => {
+					if (followsTail.current) requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: false }));
+				}}
+				onScrollToIndexFailed={({ index, averageItemLength }) => {
+					listRef.current?.scrollToOffset({ offset: Math.max(0, index * averageItemLength), animated: true });
+					setTimeout(() => listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.82 }), 120);
+				}}
+				ListFooterComponent={
+					snapshot.hasMoreBefore ? (
+						<Pressable
+							accessibilityRole="button"
+							disabled={loadingOlder}
+							onPress={() => { haptics.tap(); void onLoadOlder(); }}
+							style={styles.older}
+						>
+							{loadingOlder ? <ActivityIndicator size="small" /> : <Feather name="clock" size={12} />}
+							<Text style={styles.olderText}>{loadingOlder ? "Loading history…" : "Load earlier messages"}</Text>
+						</Pressable>
+					) : null
+				}
+				renderItem={({ item: group }) => <ConversationTurnGroup
+					group={group}
+					snapshot={snapshot}
+					approvalPending={approvalPending}
+					inputPending={inputPending}
+					onDecide={onDecide}
+					onResolveInput={onResolveInput}
+					onRollback={onRollback}
+					answeredBelow={answeredBelow}
+				/>}
+			/>
+			{showJump ? <Pressable accessibilityRole="button" accessibilityLabel="Jump to latest message" onPress={() => { haptics.tap(); followsTail.current = true; setShowJump(false); listRef.current?.scrollToOffset({ offset: 0, animated: true }); }} style={styles.jump}><Feather name="arrow-down" size={15} color={jumpToLatestColors(t).foregroundColor} /><Text style={styles.jumpText}>Latest</Text></Pressable> : null}
+		</View>
+	);
+});
+
+function ConversationTurnGroup({ group, snapshot, approvalPending, inputPending, onDecide, onResolveInput, onRollback, answeredBelow }: {
+	group: ConversationGroup;
+	snapshot: ConversationSnapshot;
+	approvalPending: boolean;
+	inputPending: boolean;
+	onDecide(requestId: string, decisionId: string): Promise<void>;
+	onResolveInput(requestId: string, action: "accept" | "decline" | "cancel", content?: Record<string, unknown>): Promise<void>;
+	onRollback?(turnId: string): Promise<number>;
+	answeredBelow?: number;
+}) {
+	// A provider failure arrives twice: as an error activity, and again as the
+	// turn's errorMessage below it. The turn keeps it — that line carries the
+	// outcome and the rollback — so the activity restating it is dropped.
+	const turnError = group.turn?.state === "failed" ? group.turn.errorMessage : undefined;
+	const items = turnError
+		? group.items.filter((item) => !(item.kind === "activity" && errorActivityDuplicatesTurn(item, turnError)))
+		: group.items;
+	const rows = activityRuns(items);
+	return <View>{rows.map((row) => row.kind === "activities"
+		? <ActivityRun key={row.key} activities={row.items} />
+		: <TimelineItem key={row.key} item={row.items[0]} sessionId={snapshot.sessionId} approvalPending={approvalPending} inputPending={inputPending} onDecide={onDecide} onResolveInput={onResolveInput} answeredBelow={answeredBelow} />)}
+		{group.turn ? <TurnSummary turn={group.turn} onRollback={canRollbackTurn(snapshot, group.turn) ? onRollback : undefined} /> : null}
+	</View>;
+}
+
+const TimelineItem = memo(function TimelineItem({
+	item,
+	sessionId,
+	approvalPending,
+	inputPending,
+	onDecide,
+	onResolveInput,
+	answeredBelow,
+}: {
+	item: ConversationItem;
+	sessionId: string;
+	approvalPending: boolean;
+	inputPending: boolean;
+	onDecide(requestId: string, decisionId: string): Promise<void>;
+	onResolveInput(requestId: string, action: "accept" | "decline" | "cancel", content?: Record<string, unknown>): Promise<void>;
+	answeredBelow?: number;
+}) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	if (item.kind === "message") {
+		if (item.role === "user" && item.origin === "human") {
+			const delivery = deliveryCopy(item.delivery);
+			const { body, attachments } = stagedAttachmentParts(item.text);
+			return (
+				<View style={styles.userRow}>
+					<View style={styles.userBubble}>
+						{body ? <Text selectable style={styles.userText}>{body}</Text> : null}
+						{attachments.length > 0 ? <StagedAttachments sessionId={sessionId} paths={attachments} spaced={Boolean(body)} /> : null}
+						{delivery ? <Text style={styles.delivery}>{delivery}</Text> : null}
+					</View>
+				</View>
+			);
+		}
+		if (item.role === "user") {
+			return <OriginMessage message={item} />;
+		}
+		return (
+			<View style={styles.assistantRow}>
+				{item.senderLabel ? <Text style={styles.sender}>{item.senderLabel}</Text> : null}
+				<ChatMarkdown text={item.streaming ? `${item.text || ""} ▍` : item.text} streaming={item.streaming} />
+				{!item.streaming && item.text ? <Pressable accessibilityRole="button" accessibilityLabel="Copy response" hitSlop={10} onPress={() => { void Clipboard.setStringAsync(item.text); haptics.success(); }} style={styles.copy}><Feather name="copy" size={12} color={t.textFaint} /></Pressable> : null}
+			</View>
+		);
+	}
+	if (item.activityKind === "approval") {
+		return <ApprovalCard activity={item} busy={approvalPending} onDecide={onDecide} handledBelow={item.sequence === answeredBelow} />;
+	}
+	if (item.activityKind === "user_input") {
+		return <UserInputCard activity={item} busy={inputPending} onResolve={onResolveInput} handledBelow={item.sequence === answeredBelow} />;
+	}
+	if (item.activityKind === "system" && item.detail?.event === "compaction") {
+		return <CompactionMarker activity={item} />;
+	}
+	if (item.activityKind === "system" && item.detail?.event === "steer") {
+		const { body, attachments } = stagedAttachmentParts(item.detail.text || item.summary);
+		return <View style={styles.userRow}><View style={[styles.userBubble, styles.steerBubble]}><Text style={styles.steerLabel}>STEERED</Text>{body ? <Text selectable style={styles.userText}>{body}</Text> : null}{attachments.length > 0 ? <StagedAttachments sessionId={sessionId} paths={attachments} spaced={Boolean(body)} /> : null}</View></View>;
+	}
+	if (item.detail?.event === "model.rerouted") return <SystemSignal icon="shuffle" title={`Answered by ${item.detail.toModel || "another model"}`} detail={item.detail.fromModel ? `Instead of ${item.detail.fromModel}${item.detail.reason ? ` · ${item.detail.reason}` : ""}` : item.detail.reason} />;
+	if (item.detail?.event === "auth.reauth_required") return <SystemSignal icon="key" danger title="The provider asked you to sign in again" detail={item.detail.reason} />;
+	if (item.activityKind === "error") return <ErrorActivity activity={item} />;
+	return <ActivityRow activity={item} />;
+});
+
+function SystemSignal({ icon, title, detail, danger }: { icon: keyof typeof Feather.glyphMap; title: string; detail?: unknown; danger?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	return <View style={[styles.systemSignal, danger && { borderColor: t.red }]}><Feather name={icon} size={15} color={danger ? t.red : t.textTertiary} /><View style={{ flex: 1 }}><Text style={[styles.systemTitle, danger && { color: t.red }]}>{title}</Text>{detail ? <Text style={styles.systemDetail}>{String(detail)}</Text> : null}</View></View>;
+}
+
+/**
+ * Files AO staged into the worktree for a human message. Images load through the
+ * daemon's preview-files route with the connection's Bearer header, the same
+ * credential every other mobile request uses; anything else stays a name chip.
+ * Images sit in the bubble as center-cropped tiles and open full-screen on tap.
+ * Render it only for messages that carry attachments: it subscribes to the app
+ * store, and doing that for every bubble would defeat TimelineItem's memo.
+ */
+function StagedAttachments({ sessionId, paths, spaced }: { sessionId: string; paths: string[]; spaced: boolean }) {
+	const { config } = useApp();
+	const styles = useThemedStyles(makeStyles);
+	const tileSize = attachmentTileSize(paths.filter(isImageAttachment).length);
+	return <View style={[styles.attachments, spaced && styles.attachmentsSpaced]}>
+		{paths.map((path) => {
+			const source = config && isImageAttachment(path)
+				? { uri: `${httpBase(config)}${previewFilePath(sessionId, path)}`, headers: authHeaders(config) }
+				: undefined;
+			return <StagedAttachment key={path} name={attachmentName(path)} source={source} tileSize={tileSize} />;
+		})}
+	</View>;
+}
+
+function StagedAttachment({ name, source, tileSize }: { name: string; source?: AttachmentImageSource; tileSize: number }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	// The failure belongs to the load that failed, so a reconnect to another address
+	// or a rotated password retries on its own; tapping the chip retries in place.
+	const [failedLoad, setFailedLoad] = useState<AttachmentImageSource>();
+	const [viewerOpen, setViewerOpen] = useState(false);
+	if (!source) {
+		return <View style={styles.attachmentChip}><Feather name="file-text" size={12} color={t.textTertiary} /><Text numberOfLines={1} style={styles.attachmentName}>{name}</Text></View>;
+	}
+	if (!isSameAttachmentLoad(failedLoad, source)) {
+		// Cover-cropping a square reads as a deliberate thumbnail; the viewer shows the whole image.
+		return <>
+			<Pressable accessibilityRole="imagebutton" accessibilityLabel={`Open ${name}`} onPress={() => { haptics.tap(); setViewerOpen(true); }} style={[styles.attachmentTile, { width: tileSize, height: tileSize }]}>
+				<Image accessibilityIgnoresInvertColors source={source} resizeMode="cover" onError={() => setFailedLoad(source)} style={styles.attachmentTileImage} />
+			</Pressable>
+			<AttachmentViewer visible={viewerOpen} name={name} source={source} onClose={() => setViewerOpen(false)} />
+		</>;
+	}
+	return <Pressable accessibilityRole="button" accessibilityLabel={`Retry loading ${name}`} hitSlop={6} onPress={() => { haptics.tap(); setFailedLoad(undefined); }} style={styles.attachmentChip}>
+		<Feather name="refresh-cw" size={12} color={t.textTertiary} />
+		<Text numberOfLines={1} style={styles.attachmentName}>{name}</Text>
+		<Text style={styles.attachmentRetry}>Tap to retry</Text>
+	</Pressable>;
+}
+
+/** Full-screen image at its own aspect ratio; pinch-zoom where the platform scroll view supports it. */
+function AttachmentViewer({ visible, name, source, onClose }: { visible: boolean; name: string; source: AttachmentImageSource; onClose(): void }) {
+	const styles = useThemedStyles(makeStyles);
+	const insets = useSafeAreaInsets();
+	const { width, height } = useWindowDimensions();
+	return <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={onClose}>
+		<View style={styles.viewer}>
+			<ScrollView maximumZoomScale={4} minimumZoomScale={1} centerContent bouncesZoom showsHorizontalScrollIndicator={false} showsVerticalScrollIndicator={false}>
+				<Image accessibilityLabel={name} accessibilityIgnoresInvertColors source={source} resizeMode="contain" style={{ width, height }} />
+			</ScrollView>
+			<Pressable accessibilityRole="button" accessibilityLabel="Close image" hitSlop={10} onPress={() => { haptics.tap(); onClose(); }} style={[styles.viewerClose, { top: insets.top + 12 }]}>
+				<Feather name="x" size={20} color="#fff" />
+			</Pressable>
+		</View>
+	</Modal>;
+}
+
+function deliveryCopy(state?: string): string | undefined {
+	switch (state) {
+		case "queued": return "Queued — sends when the agent finishes";
+		case "sending": return "Sending…";
+		case "uncertain": return "Delivery unconfirmed — check the conversation before retrying";
+		case "failed": return "Not sent";
+		default: return undefined;
+	}
+}
+
+function OriginMessage({ message }: { message: Extract<ConversationItem, { kind: "message" }> }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const long = message.text.length > 600;
+	const [expanded, setExpanded] = useState(false);
+	return <View style={styles.originMessage}>
+		<View style={styles.originHeader}><Feather name="radio" size={12} color={t.textTertiary} /><Text style={styles.originLabel}>{message.senderLabel || (message.origin === "automation" ? "Automation" : "AO")}</Text></View>
+		{long && expanded ? <ChatMarkdown text={message.text} /> : <Text selectable numberOfLines={long ? 5 : undefined} style={styles.originText}>{message.text}</Text>}
+		{long ? <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => { haptics.tap(); setExpanded((value) => !value); }} style={styles.originMore}><Feather name={expanded ? "chevron-up" : "chevron-right"} size={12} color={t.accent} /><Text style={styles.originMoreText}>{expanded ? "Hide report" : "Show full report"}</Text></Pressable> : null}
+	</View>;
+}
+
+/** Collapse consecutive mechanics so agent prose remains the visual hierarchy. */
+function activityRuns(items: ConversationItem[]): TimelineRow[] {
+	const rows: TimelineRow[] = [];
+	for (const item of items) {
+		const runnable = item.kind === "activity" &&
+			item.activityKind !== "approval" &&
+			item.activityKind !== "user_input" &&
+			item.activityKind !== "error" &&
+			item.activityKind !== "file_change" &&
+			item.activityKind !== "reasoning" &&
+			item.detail?.event === undefined;
+		const previous = rows[rows.length - 1];
+		if (runnable && previous?.kind === "activities" && previous.items[0]?.turnId === item.turnId) {
+			previous.items.push(item);
+		} else if (runnable) {
+			rows.push({ kind: "activities", key: `run-${item.sequence}`, items: [item] });
+		} else {
+			rows.push({ kind: "single", key: `${item.kind}:${item.id}`, items: [item] });
+		}
+	}
+	return rows;
+}
+
+function ActivityRow({ activity }: { activity: ConversationActivity }) {
+	if (activity.activityKind === "mcp_tool") return <McpToolRow activity={activity} />;
+	if (activity.activityKind === "auto_review") return <AutoReviewRow activity={activity} />;
+	if (activity.activityKind === "file_change") return <FileChangeActivity activity={activity} />;
+	if (activity.activityKind === "plan") return <PlanActivity activity={activity} />;
+	return <GenericActivityRow activity={activity} />;
+}
+
+function GenericActivityRow({ activity }: { activity: ConversationActivity }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const detail = activity.detail ?? {};
+	const output = commandOutputText(detail.output ?? detail.result ?? detail.error ?? detail.patchOutput);
+	const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+	const open = openOverride ?? activityStartsExpanded(activity);
+	const expandable = Boolean(output || detail.cwd || detail.arguments || detail.files || detail.reason || detail.text || detail.terminalInput);
+	const meta = activityMeta(activity);
+	return (
+		<View style={styles.activityWrap}>
+			<Pressable
+				accessibilityRole={expandable ? "button" : undefined}
+				accessibilityState={expandable ? { expanded: open } : undefined}
+				disabled={!expandable}
+				onPress={() => { haptics.tap(); setOpenOverride(!open); }}
+				style={styles.activityRow}
+			>
+				<Feather name={meta.icon} size={12} color={meta.color(t)} />
+				<Text numberOfLines={open ? undefined : 2} style={[styles.activitySummary, activity.status === "failed" && { color: t.red }]}>
+					{meta.prefix ? `${meta.prefix} ` : ""}{detail.command || detail.toolName || activity.summary}
+				</Text>
+				{activity.status === "running" ? <ActivityIndicator size="small" color={t.orange} /> : null}
+				{activity.status === "cancelled" ? <Text style={styles.activityStopped}>stopped</Text> : null}
+				{expandable ? <Feather name={open ? "chevron-up" : "chevron-right"} size={12} color={t.textFaint} /> : null}
+			</Pressable>
+			{open ? (
+				<View style={styles.activityDetail}>
+					{detail.cwd ? <LabelValue label="cwd" value={detail.cwd} /> : null}
+					{detail.reason || detail.text ? <Text style={styles.detailCopy}>{detail.reason ?? detail.text}</Text> : null}
+					{detail.arguments !== undefined ? <CodeOutput value={printable(detail.arguments)} /> : null}
+					{detail.terminalInput ? <TerminalInput text={detail.terminalInput} truncated={detail.terminalInputTruncated} /> : null}
+					{output ? <CodeOutput value={output} /> : null}
+					{detail.outputTruncated || detail.patchOutputTruncated ? <Text style={[styles.partial, { color: t.amber }]}>This output is longer than AO stores, so it stops early. Open the worktree shell for the full run.</Text> : detail.outputMayBePartial ? <Text style={styles.partial}>{detail.outputSource === "stream" ? "Streamed live; the provider may have omitted the beginning." : "The provider's rolled-up output may omit the beginning."} Open the worktree shell for the full run.</Text> : null}
+					{Array.isArray(detail.files) ? <FileList files={detail.files} /> : null}
+				</View>
+			) : null}
+		</View>
+	);
+}
+
+function TerminalInput({ text, truncated }: { text: string; truncated?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	return <View style={styles.terminalInput}><View style={styles.terminalInputTitle}><Feather name="corner-down-right" size={12} color={t.textTertiary} /><Text style={styles.detailLabel}>AGENT TYPED</Text></View><CodeOutput value={caretNotation(text)} />{truncated ? <Text style={styles.partial}>AO stopped recording keystrokes at its cap; more were sent.</Text> : null}</View>;
+}
+
+function McpToolRow({ activity }: { activity: ConversationActivity }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [open, setOpen] = useState(activity.status === "failed");
+	const detail = activity.detail ?? {};
+	const failed = activity.status === "failed" || detail.success === false || Boolean(detail.error);
+	const body = detail.arguments !== undefined || detail.result !== undefined || Boolean(detail.error || detail.progress);
+	return <View style={styles.activityWrap}>
+		<Pressable disabled={!body} accessibilityRole={body ? "button" : undefined} accessibilityState={body ? { expanded: open } : undefined} onPress={() => { haptics.tap(); setOpen((value) => !value); }} style={styles.activityRow}>
+			<Feather name="tool" size={12} color={failed ? t.red : t.textSecondary} />
+			<Text style={[styles.server, failed && { color: t.red }]}>{detail.server ?? detail.namespace ? `${detail.server ?? detail.namespace}/` : ""}</Text>
+			<Text numberOfLines={1} style={[styles.activitySummary, failed && { color: t.red }]}>{detail.toolName || activity.summary}</Text>
+			{detail.progress ? <Text numberOfLines={1} style={styles.activityProgress}>{lastLine(detail.progress)}</Text> : null}
+			{activity.status === "running" ? <ActivityIndicator size="small" color={t.orange} /> : activity.status === "cancelled" ? <Text style={styles.activityStopped}>stopped</Text> : body ? <Feather name={open ? "chevron-up" : "chevron-right"} size={12} color={t.textFaint} /> : null}
+		</Pressable>
+		{open && body ? <View style={styles.activityDetail}>{detail.error ? <Text style={[styles.detailCopy, { color: t.red }]}>{detail.error}</Text> : null}{detail.arguments !== undefined ? <JsonPayload label="Arguments" value={detail.arguments} /> : null}{detail.result !== undefined ? <JsonPayload label="Result" value={detail.result} /> : null}{detail.progress ? <View><Text style={styles.detailLabel}>PROGRESS</Text><CodeOutput value={detail.progress} />{detail.progressTruncated ? <Text style={styles.partial}>Progress was longer than AO stores.</Text> : null}</View> : null}</View> : null}
+	</View>;
+}
+
+function JsonPayload({ label, value }: { label: string; value: unknown }) {
+	const styles = useThemedStyles(makeStyles);
+	const note = truncationNote(value);
+	return <View><Text style={styles.detailLabel}>{label.toUpperCase()}</Text>{note ? <Text style={styles.detailCopy}>{note}</Text> : <CodeOutput value={printable(value)} />}</View>;
+}
+
+function AutoReviewRow({ activity }: { activity: ConversationActivity }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [open, setOpen] = useState(false);
+	const detail = activity.detail ?? {};
+	const denied = String(detail.status ?? "").toLowerCase().includes("den");
+	const paths = reviewPaths(detail.files);
+	const body = Boolean(detail.rationale || detail.command || detail.cwd || detail.host || detail.decisionSource || paths.length);
+	return <View style={styles.activityWrap}><Pressable disabled={!body} accessibilityRole={body ? "button" : undefined} accessibilityState={body ? { expanded: open } : undefined} onPress={() => { haptics.tap(); setOpen((value) => !value); }} style={styles.activityRow}><Feather name={denied ? "shield-off" : "shield"} size={12} color={denied ? t.red : t.green} /><Text style={[styles.reviewDecision, denied && { color: t.red }]}>{denied ? "Auto-declined" : "Auto-approved"}</Text><Text numberOfLines={1} style={styles.activitySummary}>{activity.summary}</Text>{detail.riskLevel ? <Text style={[styles.risk, ["high", "critical"].includes(detail.riskLevel.toLowerCase()) && { color: t.red }]}>{detail.riskLevel}</Text> : null}{body ? <Feather name={open ? "chevron-up" : "chevron-right"} size={12} color={t.textFaint} /> : null}</Pressable>{open && body ? <View style={styles.activityDetail}><Text style={styles.detailCopy}>{denied ? "The provider declined this on your behalf. You were not asked." : "The provider allowed this on your behalf. You were not asked."}</Text>{detail.rationale ? <Text style={styles.reviewRationale}>{detail.rationale}</Text> : null}{detail.command ? <LabelValue label="cmd" value={detail.command} /> : null}{detail.cwd ? <LabelValue label="cwd" value={detail.cwd} /> : null}{detail.host ? <LabelValue label="host" value={detail.host} /> : null}{paths.length ? <LabelValue label="files" value={paths.join(", ")} /> : null}{detail.decisionSource ? <LabelValue label="by" value={detail.decisionSource} /> : null}</View> : null}</View>;
+}
+
+function FileChangeActivity({ activity }: { activity: ConversationActivity }) {
+	const files = fileChanges(activity.detail?.files);
+	return <View style={useThemedStyles(makeStyles).activityWrap}><ExpandableFileList title={activity.summary || `${files.length} changed files`} files={files} fallbackPatch={activity.detail?.patchOutput} fallbackPatchTruncated={activity.detail?.patchOutputTruncated} live={activity.status === "running"} /></View>;
+}
+
+function ExpandableFileList({ title, files, fallbackPatch, fallbackPatchTruncated, live }: { title: string; files: ReturnType<typeof fileChanges>; fallbackPatch?: string; fallbackPatchTruncated?: boolean; live?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+	const open = openOverride ?? Boolean(live && (fallbackPatch || files.some((file) => file.patch)));
+	const expandable = files.length > 0 || Boolean(fallbackPatch);
+	return <View><Pressable disabled={!expandable} accessibilityRole={expandable ? "button" : undefined} accessibilityState={expandable ? { expanded: open } : undefined} onPress={() => { haptics.tap(); setOpenOverride(!open); }} style={styles.activityRow}><Feather name="edit-3" size={12} color={t.accent} /><Text numberOfLines={2} style={styles.activitySummary}>{title}</Text>{expandable ? <Feather name={open ? "chevron-up" : "chevron-right"} size={12} color={t.textFaint} /> : null}</Pressable>{open ? <View style={styles.activityDetail}>{files.map((file) => <FileChangeRow key={`${file.oldPath ?? ""}:${file.path}`} file={file} live={live} />)}{fallbackPatch ? <PatchBlock patch={fallbackPatch} truncated={fallbackPatchTruncated} /> : null}</View> : null}</View>;
+}
+
+function FileChangeRow({ file, live }: { file: ReturnType<typeof fileChanges>[number]; live?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [open, setOpen] = useState(Boolean(live && file.patch));
+	const hasPatch = Boolean(file.patch);
+	const mark = file.status === "added" ? "A" : file.status === "deleted" ? "D" : file.status === "renamed" ? "R" : "M";
+	return <View><Pressable disabled={!hasPatch} accessibilityRole={hasPatch ? "button" : undefined} accessibilityState={hasPatch ? { expanded: open } : undefined} onPress={() => { haptics.tap(); setOpen((value) => !value); }} style={styles.fileRow}><Text style={[styles.fileMark, { color: file.status === "deleted" ? t.red : file.status === "added" ? t.green : t.accent }]}>{mark}</Text><Text selectable numberOfLines={2} style={styles.filePath}>{file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}</Text><Text style={styles.fileStat}>+{file.additions} −{file.deletions}</Text>{hasPatch ? <Feather name={open ? "chevron-up" : "chevron-right"} size={12} color={t.textFaint} /> : null}</Pressable>{open && file.patch ? <PatchBlock patch={file.patch} truncated={file.patchTruncated} /> : null}</View>;
+}
+
+function PatchBlock({ patch, truncated }: { patch: string; truncated?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	return <View><Pressable onLongPress={() => { void Clipboard.setStringAsync(patch); haptics.success(); }}><HighlightedCodeText code={patch} language="diff" style={styles.output} /></Pressable>{truncated ? <Text style={[styles.partial, { color: t.amber }]}>This patch is longer than AO stores. The complete change remains in the worktree.</Text> : null}</View>;
+}
+
+function PlanActivity({ activity }: { activity: ConversationActivity }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [open, setOpen] = useState(activity.status === "running");
+	const steps = activity.detail?.steps ?? [];
+	return <View style={styles.planCard}><Pressable
+			accessibilityRole="button"
+			accessibilityState={{ expanded: open }}
+			style={styles.planHeader}
+			onPress={() => { haptics.tap(); setOpen((value) => !value); }}
+			><Feather name="list" size={12} color={t.textTertiary} /><Text style={styles.planTitle}>{activity.summary || "Plan updated"}</Text><Text style={styles.planCount}>{steps.filter((step) => step.status === "completed").length}/{steps.length}</Text><Feather name={open ? "chevron-up" : "chevron-down"} size={12} color={t.textTertiary} /></Pressable>{open ? <View style={styles.planBody}>{activity.detail?.explanation ? <Text style={styles.detailCopy}>{activity.detail.explanation}</Text> : null}{steps.map((step, index) => <View key={index} style={styles.planStep}><Feather name={step.status === "completed" ? "check-circle" : "circle"} size={15} color={step.status === "completed" ? t.green : step.status === "in_progress" ? t.orange : t.textFaint} /><Text style={[styles.planStepText, step.status === "completed" && styles.planDone]}>{step.text}</Text></View>)}{!steps.length ? <Text style={styles.detailCopy}>{activity.detail?.text || activity.summary}</Text> : null}</View> : null}</View>;
+}
+
+function ActivityRun({ activities }: { activities: ConversationActivity[] }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [override, setOverride] = useState<boolean | null>(null);
+	const hierarchy = activityHierarchy(activities);
+	if (activities.length === 1 && hierarchy[0]?.children.length === 0) return <ActivityRow activity={activities[0]} />;
+	const running = activities.some((activity) => activity.status === "running");
+	const failed = activities.filter((activity) => activity.status === "failed").length;
+	const cancelled = activities.filter((activity) => activity.status === "cancelled").length;
+	const streaming = activities.some((activity) => activity.status === "running" && Boolean(activity.detail?.output));
+	const open = override ?? streaming;
+	return <View style={styles.runWrap}>
+		<Pressable
+			accessibilityRole="button"
+			accessibilityState={{ expanded: open }}
+			onPress={() => { haptics.tap(); setOverride(!open); }}
+			style={styles.runSummary}
+		>
+			<Text style={styles.runText}>{summarizeActivities(activities)}</Text>
+			{failed ? <Text style={styles.runFailed}>{failed} failed</Text> : null}
+			{cancelled ? <Text style={styles.runStopped}>{cancelled} stopped</Text> : null}
+			{running ? <ActivityIndicator size="small" color={t.textTertiary} /> : null}
+			<Feather name={open ? "chevron-down" : "chevron-right"} size={12} color={t.textFaint} />
+		</Pressable>
+		{open ? <View style={styles.runDetail}>{hierarchy.map((node) => <ActivityTree key={node.activity.id} node={node} />)}</View> : null}
+	</View>;
+}
+
+function ActivityTree({ node }: { node: ActivityNode }) {
+	const styles = useThemedStyles(makeStyles);
+	return <View><ActivityRow activity={node.activity} />{node.children.length ? <NestedAgentRun nodes={node.children} /> : null}</View>;
+}
+
+function NestedAgentRun({ nodes }: { nodes: ActivityNode[] }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [open, setOpen] = useState(false);
+	const count = countActivityNodes(nodes);
+	const running = activityNodesRunning(nodes);
+	return <View style={styles.subagent}>
+		<Pressable
+			accessibilityRole="button"
+			accessibilityLabel={`${open ? "Hide" : "Show"} subagent work, ${count} ${count === 1 ? "step" : "steps"}`}
+			accessibilityState={{ expanded: open }}
+			onPress={() => { haptics.tap(); setOpen((value) => !value); }}
+			style={styles.subagentHeader}
+		>
+			<Feather name="git-branch" size={12} color={t.textTertiary} />
+			<Text style={styles.subagentLabel}>SUBAGENT · {count} {count === 1 ? "STEP" : "STEPS"}</Text>
+			{running ? <ActivityIndicator size="small" color={t.textTertiary} /> : null}
+			<Feather name={open ? "chevron-down" : "chevron-right"} size={12} color={t.textFaint} />
+		</Pressable>
+		{open ? nodes.map((child) => <ActivityTree key={child.activity.id} node={child} />) : null}
+	</View>;
+}
+
+function summarizeActivities(activities: ConversationActivity[]): string {
+	let reads = 0;
+	let searches = 0;
+	let vcs = 0;
+	let commands = 0;
+	let tools = 0;
+	let reviews = 0;
+	let plans = 0;
+	for (const activity of activities) {
+		if (activity.activityKind === "mcp_tool") { tools++; continue; }
+		if (activity.activityKind === "auto_review") { reviews++; continue; }
+		if (activity.activityKind === "plan") { plans++; continue; }
+		switch (commandCategory(activity.detail?.command ?? activity.summary)) {
+			case "read": reads++; break;
+			case "search": searches++; break;
+			case "vcs": vcs++; break;
+			default: commands++;
+		}
+	}
+	const parts: string[] = [];
+	if (reads) parts.push(`${reads} ${reads === 1 ? "file" : "files"}`);
+	if (searches) parts.push(`${searches} ${searches === 1 ? "search" : "searches"}`);
+	if (vcs) parts.push(`${vcs} git ${vcs === 1 ? "check" : "checks"}`);
+	if (commands) parts.push(`${commands} ${commands === 1 ? "command" : "commands"}`);
+	if (tools) parts.push(`${tools} tool ${tools === 1 ? "call" : "calls"}`);
+	if (reviews) parts.push(`${reviews} auto-${reviews === 1 ? "decision" : "decisions"}`);
+	if (plans) parts.push("updated plan");
+	return `${reads || searches ? "Explored" : "Ran"} ${parts.length ? parts.join(", ") : `${activities.length} steps`}`;
+}
+
+function commandCategory(text: string): "read" | "search" | "vcs" | "run" {
+	const head = text.trim().split(/\s+/, 1)[0] ?? "";
+	const binary = head.slice(head.lastIndexOf("/") + 1);
+	if (READ_COMMANDS.has(binary)) return "read";
+	if (SEARCH_COMMANDS.has(binary)) return "search";
+	if (binary === "git" || binary === "gh") return "vcs";
+	return "run";
+}
+
+const READ_COMMANDS = new Set(["cat", "sed", "nl", "head", "tail", "bat", "less", "more", "wc", "jq"]);
+const SEARCH_COMMANDS = new Set(["rg", "grep", "find", "fd", "ls", "tree", "glob", "ag"]);
+
+function TurnSummary({ turn, onRollback }: { turn: ConversationTurn; onRollback?(turnId: string): Promise<number> }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [confirming, setConfirming] = useState(false);
+	const [rollingBack, setRollingBack] = useState(false);
+	const [rollbackError, setRollbackError] = useState<string>();
+	const running = turn.state === "running";
+	const [nowMs, setNowMs] = useState(() => Date.now());
+	useEffect(() => {
+		if (!running) return;
+		setNowMs(Date.now());
+		const timer = setInterval(() => setNowMs(Date.now()), 1_000);
+		return () => clearInterval(timer);
+	}, [running, turn.id]);
+	const duration = elapsed(turn.startedAt ?? turn.requestedAt, turn.completedAt);
+	const workingDuration = running ? workingElapsedLabel(turn.startedAt ?? turn.requestedAt, nowMs) : undefined;
+	const settled = turn.state !== "running" && turn.state !== "queued";
+	const summary = turn.rolledBack
+		? "Rolled back"
+		: turn.state === "completed"
+			? duration ? `Worked for ${duration}` : "Work completed"
+			: turn.state === "failed"
+				? duration ? `Failed after ${duration}` : "Turn failed"
+				: turn.state === "interrupted"
+					? duration ? `Stopped after ${duration}` : "Turn stopped"
+					: turn.state === "queued" ? "Queued" : workingDuration ? `Working · ${workingDuration}` : "Working";
+	return (
+		<View style={styles.turnWrap}>
+			{turn.plan?.steps.length ? <TurnPlan turn={turn} /> : null}
+			{turn.diff?.files.length ? <ChangedFiles turn={turn} /> : null}
+			<View style={styles.turnLine}>
+				<Text style={[styles.turnState, turn.state === "failed" && { color: t.red }]}>{summary}</Text>
+				{onRollback && settled && turn.providerTurnId && !turn.rolledBack ? (
+					<Pressable accessibilityLabel="Roll back to before this turn" hitSlop={8} onPress={() => { haptics.warning(); setConfirming(true); }}>
+						<Feather name="rotate-ccw" size={12} color={t.textTertiary} />
+					</Pressable>
+				) : null}
+			</View>
+			{turn.errorMessage ? <Text style={styles.turnError}>{turn.errorMessage}</Text> : null}
+			{confirming ? (
+				<View style={styles.rollbackConfirm}>
+					<Text style={styles.rollbackTitle}>Make the agent forget this turn and everything after it?</Text>
+					<Text style={styles.rollbackCopy}>Files stay changed. Only conversation memory is rolled back, and this cannot be undone.</Text>
+					<View style={styles.actions}>
+						<Action label="Cancel" disabled={rollingBack} onPress={() => { setRollbackError(undefined); setConfirming(false); }} />
+						<Action label={rollingBack ? "Rolling back…" : "Roll back"} disabled={rollingBack} tone="danger" onPress={() => {
+							if (!onRollback || rollingBack) return;
+							setRollingBack(true);
+							setRollbackError(undefined);
+							void onRollback(turn.id).then(() => setConfirming(false)).catch((cause) => {
+								setRollbackError(userFacingError(cause));
+							}).finally(() => setRollingBack(false));
+						}} />
+					</View>
+					{rollbackError ? <Text style={styles.validation}>{rollbackError}</Text> : null}
+				</View>
+			) : null}
+		</View>
+	);
+}
+
+function TurnPlan({ turn }: { turn: ConversationTurn }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [open, setOpen] = useState(turn.state === "running");
+	const done = turn.plan?.steps.filter((step) => step.status === "completed").length ?? 0;
+	return (
+		<View style={styles.planCard}>
+			<Pressable
+				accessibilityRole="button"
+				accessibilityState={{ expanded: open }}
+				style={styles.planHeader}
+				onPress={() => { haptics.tap(); setOpen((value) => !value); }}
+				>
+				<Feather name="list" size={12} color={t.textTertiary} />
+				<Text style={styles.planTitle}>Plan</Text>
+				{turn.state === "running" ? <Text style={styles.planLive}>STILL CHANGING</Text> : null}
+				<Text style={styles.planCount}>{done}/{turn.plan?.steps.length ?? 0}</Text>
+				<Feather name={open ? "chevron-up" : "chevron-down"} size={12} color={t.textTertiary} />
+			</Pressable>
+			{open ? <View style={styles.planBody}>
+				{turn.plan?.explanation ? <Text style={styles.detailCopy}>{turn.plan.explanation}</Text> : null}
+				{turn.plan?.steps.map((step, index) => <View key={index} accessibilityLabel={`${step.status.replace("_", " ")}: ${step.text}`} style={styles.planStep}>
+					<Feather name={step.status === "completed" ? "check-circle" : step.status === "in_progress" ? "circle" : "circle"} size={15} color={step.status === "completed" ? t.green : step.status === "in_progress" ? t.orange : t.textFaint} />
+					<Text style={[styles.planStepText, step.status === "completed" && styles.planDone]}>{step.text}</Text>
+					<Text style={styles.planStepState}>{step.status.replace("_", " ")}</Text>
+				</View>)}
+			</View> : null}
+		</View>
+	);
+}
+
+function ChangedFiles({ turn }: { turn: ConversationTurn }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [open, setOpen] = useState(false);
+	const files = turn.diff?.files ?? [];
+	return <View style={styles.planCard}>
+		<Pressable
+			accessibilityRole="button"
+			accessibilityState={{ expanded: open }}
+			style={styles.planHeader}
+			onPress={() => { haptics.tap(); setOpen((value) => !value); }}
+			>
+			<Feather name="file-text" size={12} color={t.textTertiary} />
+			<Text style={styles.planTitle}>{files.length} changed {files.length === 1 ? "file" : "files"}</Text>
+			{turn.state === "running" ? <><Text style={styles.planLive}>GROWING</Text><ActivityIndicator size="small" color={t.textTertiary} /></> : null}
+			<Text style={{ fontFamily: "Geist_400Regular", color: t.green, fontSize: type.caption2.fontSize }}>+{files.reduce((sum, file) => sum + file.additions, 0)}</Text>
+			<Text style={{ fontFamily: "Geist_400Regular", color: t.red, fontSize: type.caption2.fontSize }}>−{files.reduce((sum, file) => sum + file.deletions, 0)}</Text>
+			<Feather name={open ? "chevron-up" : "chevron-down"} size={12} color={t.textTertiary} />
+		</Pressable>
+		{open ? <View style={styles.fileBody}>{files.map((file) => <View key={`${file.oldPath}:${file.path}`} style={styles.fileRow}>
+			<Text style={[styles.fileMark, { color: file.status === "deleted" ? t.red : file.status === "added" ? t.green : t.accent }]}>{file.status[0].toUpperCase()}</Text>
+			<Text selectable style={styles.filePath}>{file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}</Text>
+			<Text style={styles.fileStat}>+{file.additions} −{file.deletions}</Text>
+		</View>)}{turn.diff?.truncated ? <Text style={[styles.partial, { color: t.amber }]}>This turn changed more files than AO lists here. Open the worktree shell for the complete diff.</Text> : null}</View> : null}
+	</View>;
+}
+
+/**
+ * What was asked, with no way to answer it — for a request whose controls live
+ * in the composer. The timeline stays the record; the composer is the surface.
+ */
+function RequestEcho({ title, detail }: { title: string; detail?: string }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	return <View style={styles.approvalResolved}>
+		<View style={[styles.approvalDot, { backgroundColor: t.amber }]} />
+		<Text style={styles.approvalResolvedLabel}>{title}</Text>
+		{detail ? <Text selectable numberOfLines={1} style={styles.approvalResolvedCommand}>{detail}</Text> : null}
+	</View>;
+}
+
+function ApprovalCard({ activity, busy, onDecide, handledBelow }: { activity: ConversationActivity; busy: boolean; onDecide(requestId: string, decisionId: string): Promise<void>; handledBelow?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const [submitting, setSubmitting] = useState<string>();
+	const [submitError, setSubmitError] = useState<string>();
+	const pending = activity.status === "pending";
+	const presentation = requestPresentation("approval", pending);
+	const command = activity.detail?.command ?? activity.summary;
+	if (pending && handledBelow) return <RequestEcho title={presentation.title} detail={command} />;
+	if (!pending) return <View style={styles.approvalResolved}>
+		<Feather name={presentation.icon} size={12} color={t.textFaint} />
+		<Text style={styles.approvalResolvedLabel}>{presentation.title}</Text>
+		<Text selectable numberOfLines={1} style={styles.approvalResolvedCommand}>{command}</Text>
+	</View>;
+	return <View style={styles.approvalRequest}>
+		<View style={styles.approvalStatus}><View style={styles.approvalDot} /><Text style={styles.approvalStatusText}>{presentation.title}</Text></View>
+		{activity.detail?.reason ? <Text selectable style={styles.requestCopy}>{activity.detail.reason}</Text> : null}
+		<View style={styles.approvalCommandSurface}>
+			<Feather name="terminal" size={12} color={t.textTertiary} />
+			<Text selectable style={styles.requestCommand}>{command}</Text>
+		</View>
+		{activity.detail?.cwd ? <LabelValue label="cwd" value={activity.detail.cwd} /> : null}
+		{activity.decisions?.length ? <View style={styles.approvalActions}>{activity.decisions.map((decision, index) => {
+			const label = submitting === decision.id ? "Sending…" : decision.label;
+			return <ElicitationAction key={decision.id} label={label} width={actionControlWidth(label, index === 0)} primary={index === 0} disabled={busy || Boolean(submitting) || !activity.requestId} onPress={() => {
+				setSubmitting(decision.id);
+				setSubmitError(undefined);
+				void onDecide(activity.requestId ?? "", decision.id).catch((cause) => setSubmitError(userFacingError(cause))).finally(() => setSubmitting(undefined));
+			}} />;
+		})}</View> : <Text style={[styles.partial, { color: t.amber }]}>The agent offered no decisions AO can present. Open diagnostics from the host.</Text>}
+		{submitError ? <Text accessibilityRole="alert" selectable style={styles.validation}>{submitError}</Text> : null}
+	</View>;
+}
+
+function UserInputCard({ activity, busy, onResolve, handledBelow }: { activity: ConversationActivity; busy: boolean; onResolve(requestId: string, action: "accept" | "decline" | "cancel", content?: Record<string, unknown>): Promise<void>; handledBelow?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const schema = activity.detail?.schema;
+	const [values, setValues] = useState<Record<string, unknown>>(() => Object.fromEntries(Object.entries(schema?.properties ?? {}).map(([key, property]) => [key, initialInputValue(property)])));
+	const [validationError, setValidationError] = useState<string>();
+	const [submitting, setSubmitting] = useState(false);
+	const [submitError, setSubmitError] = useState<string>();
+	const [activeQuestion, setActiveQuestion] = useState(0);
+	const pending = activity.status === "pending";
+	const url = activity.detail?.inputMode === "url" ? safeHttpURL(activity.detail.url) : undefined;
+	const properties = Object.entries(schema?.properties ?? {});
+	const questionGroups = groupedQuestionInputs(properties);
+	const visibleProperties = questionGroups?.[activeQuestion] ?? properties;
+	const hasPreviousQuestion = Boolean(questionGroups && activeQuestion > 0);
+	const hasNextQuestion = Boolean(questionGroups && activeQuestion < questionGroups.length - 1);
+	const step = elicitationStepPresentation(activeQuestion, questionGroups?.length ?? 1);
+	const promptCopy = elicitationPromptCopy(activity.detail?.message || schema?.description || activity.summary);
+	if (pending && handledBelow) return <RequestEcho title={step.status} detail={promptCopy} />;
+	const resolve = async (action: "accept" | "decline" | "cancel", content?: Record<string, unknown>) => {
+		if (submitting || !activity.requestId) return;
+		setSubmitting(true);
+		setSubmitError(undefined);
+		try { await onResolve(activity.requestId, action, content); }
+		catch (cause) { setSubmitError(userFacingError(cause)); }
+		finally { setSubmitting(false); }
+	};
+	const submit = () => {
+		const visibleRequired = visibleProperties.flatMap(([name]) => schema?.required?.includes(name) ? [name] : []);
+		const missing = missingRequiredInputs(visibleRequired, values);
+		if (missing.length) { setValidationError(`Complete ${missing.join(", ")} before continuing.`); return; }
+		for (const [name, property] of visibleProperties) {
+			const problem = validateInput(property, values[name]);
+			if (problem) { setValidationError(`${property.title || humanizeInputName(name)} ${problem}.`); return; }
+		}
+		setValidationError(undefined);
+		if (hasNextQuestion) {
+			setActiveQuestion((current) => current + 1);
+			return;
+		}
+		void resolve("accept", values);
+	};
+	return <View style={pending ? styles.inputRequest : [styles.requestCard, styles.requestCardResolved]}>
+		<View style={styles.inputRequestStatus}><View style={[styles.inputRequestDot, { backgroundColor: pending ? t.amber : t.textFaint }]} /><Text style={styles.inputRequestStatusText}>{pending ? step.status : "Input resolved"}</Text></View>
+		{promptCopy ? <Text style={styles.requestCopy}>{promptCopy}</Text> : null}
+		{pending && activity.detail?.inputMode === "url" ? <View style={styles.urlBox}><Text selectable style={styles.urlText}>{url?.href ?? "The provider supplied an unsafe or invalid URL."}</Text></View> : null}
+		{pending && activity.detail?.inputMode !== "url" && schema?.properties ? <View style={styles.form}>
+			{visibleProperties.map(([name, property]) => <InputField key={name} name={name} property={property} required={schema.required?.includes(name) ?? false} value={values[name]} onChange={(value) => { setValidationError(undefined); setValues((old) => ({ ...old, [name]: value })); }} />)}
+		</View> : null}
+		{validationError ? <Text accessibilityRole="alert" style={styles.validation}>{validationError}</Text> : null}
+		{submitError ? <Text accessibilityRole="alert" style={styles.validation}>{submitError}</Text> : null}
+		{pending && activity.requestId ? <View style={styles.inputActions}>
+			<ElicitationAction label="Cancel" disabled={busy || submitting} onPress={() => void resolve("cancel")} />
+			<ElicitationAction label={activity.detail?.inputMode === "url" ? "Decline" : "Skip"} disabled={busy || submitting} onPress={() => void resolve("decline")} />
+			<View style={{ flex: 1 }} />
+			{activity.detail?.inputMode !== "url" && hasPreviousQuestion ? <ElicitationAction label="Back" disabled={busy || submitting} onPress={() => { setValidationError(undefined); setActiveQuestion((current) => Math.max(0, current - 1)); }} /> : null}
+			{activity.detail?.inputMode === "url" ? <ElicitationAction label={submitting ? "Opening…" : "Open link"} primary disabled={busy || submitting || !url} onPress={() => {
+				if (!url) return;
+				void Linking.openURL(url.href)
+					.then(() => resolve("accept"))
+					.catch(() => setValidationError("This link could not be opened on this device."));
+			}} /> : <ElicitationAction label={submitting ? "Sending…" : step.primaryLabel} primary disabled={busy || submitting} onPress={submit} />}
+		</View> : pending ? <Text style={[styles.partial, { color: t.amber }]}>This request has no provider identity, so AO cannot answer it safely. Open diagnostics on the host.</Text> : <Text style={styles.partial}>Already answered. This card is kept for the record.</Text>}
+	</View>;
+}
+
+function InputField({ name, property, required, value, onChange }: { name: string; property: InputProperty; required: boolean; value: unknown; onChange(value: unknown): void }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const label = `${property.title || humanizeInputName(name)}${required ? " *" : ""}`;
+	if (property.type === "boolean") return <View style={styles.switchRow}><Text style={styles.inputLabel}>{label}</Text><Switch accessibilityLabel={label} value={Boolean(value)} onValueChange={onChange} trackColor={{ true: t.accent }} /></View>;
+	const options = inputOptions(property);
+	if (options.length) {
+		const multi = property.type === "array";
+		return <View style={styles.field}>
+			<Text style={styles.inputEyebrow}>{label}</Text>
+			{property.description ? <Text style={styles.inputQuestion}>{property.description}</Text> : null}
+			<ElicitationChoiceList choices={options} multi={multi} selected={(choice) => multi ? Array.isArray(value) && value.includes(choice) : value === choice} onChange={(choice) => onChange(multi ? toggleInputValue(Array.isArray(value) ? value : [], choice) : choice)} />
+		</View>;
+	}
+	return <View style={styles.field}>
+		<Text style={styles.inputLabel}>{label}</Text>
+		{property.description ? <Text style={styles.inputHint}>{property.description}</Text> : null}
+		<ElicitationTextField label={label} value={value} numeric={property.type === "number" || property.type === "integer"} maxLength={property.maxLength} onChange={onChange} />
+	</View>;
+}
+
+
+function CompactionMarker({ activity }: { activity: ConversationActivity }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const after = activity.detail?.tokensAfter;
+	const window = activity.detail?.contextWindow;
+	return <View style={styles.compaction}><Feather name="archive" size={12} color={t.textFaint} /><Text style={styles.compactionText}>HISTORY COMPACTED{activity.detail?.tokensReclaimed ? `  −${formatTokens(activity.detail.tokensReclaimed)}` : ""}{after && window ? `  ${Math.round((after / window) * 100)}% FULL` : ""}</Text></View>;
+}
+
+function ErrorActivity({ activity }: { activity: ConversationActivity }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	// Providers set several fields to the same sentence — Codex sends the
+	// usage-limit text as both summary and detail.error — so rendering each in
+	// turn printed one failure twice inside this card. Same rule as the renderer.
+	const { headline, detail } = providerErrorCopy(activity);
+	return <View style={[styles.errorCard, { borderColor: t.tintRed }]}><Feather name="alert-triangle" size={15} color={t.red} /><View style={{ flex: 1 }}><Text style={styles.errorTitle}>{headline}</Text>{detail ? <Text selectable style={styles.errorCopy}>{detail}</Text> : null}</View></View>;
+}
+
+function EmptyConversation({ controller }: { controller: string }) {
+	const styles = useThemedStyles(makeStyles);
+	return <View style={styles.empty}><View style={styles.emptyMascot}><MascotLamp size={48} /></View><Text style={styles.emptyTitle}>{controller === "connecting" ? "Connecting to the agent…" : "Start with a task"}</Text></View>;
+}
+
+function Action({ label, hint, onPress, primary, tone, disabled }: { label: string; hint?: string; onPress(): void; primary?: boolean; tone?: "danger"; disabled?: boolean }) {
+	const t = useTheme();
+	const styles = useThemedStyles(makeStyles);
+	const fill = tone === "danger" ? t.tintRed : primary ? t.accent : t.bgElevated;
+	const ink = tone === "danger" ? t.red : primary ? t.onAccent : t.textPrimary;
+	return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={() => { if (tone === "danger") haptics.warning(); else haptics.tap(); onPress(); }} style={({ pressed }) => [styles.action, { backgroundColor: fill }, pressed && { opacity: 0.75 }, disabled && { opacity: 0.45 }]}><Text style={[styles.actionLabel, { color: ink }]}>{label}</Text>{hint ? <Text style={styles.actionHint}>{hint}</Text> : null}</Pressable>;
+}
+
+function LabelValue({ label, value }: { label: string; value: string }) { const styles = useThemedStyles(makeStyles); return <View style={styles.labelValue}><Text style={styles.detailLabel}>{label}</Text><Text selectable style={styles.detailValue}>{value}</Text></View>; }
+function CodeOutput({ value }: { value: string }) { const styles = useThemedStyles(makeStyles); return <Pressable onLongPress={() => { void Clipboard.setStringAsync(value); haptics.success(); }}><Text selectable style={styles.output}>{value}</Text></Pressable>; }
+function FileList({ files }: { files: unknown[] }) { const styles = useThemedStyles(makeStyles); return <View style={styles.fileBody}>{files.map((file, index) => <Text key={index} selectable style={styles.filePath}>• {typeof file === "string" ? file : printable(file)}</Text>)}</View>; }
+
+function printable(value: unknown): string {
+	if (value === null || value === undefined) return "";
+	if (typeof value === "string") return value;
+	try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+}
+
+function fileChanges(value: unknown): FileChange[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((entry): FileChange[] => {
+		if (!entry || typeof entry !== "object") return [];
+		const file = entry as Record<string, unknown>;
+		if (typeof file.path !== "string") return [];
+		const status = ["added", "modified", "deleted", "renamed"].includes(String(file.status)) ? String(file.status) as FileChange["status"] : "modified";
+		return [{ path: file.path, oldPath: typeof file.oldPath === "string" ? file.oldPath : undefined, status, additions: typeof file.additions === "number" ? file.additions : 0, deletions: typeof file.deletions === "number" ? file.deletions : 0, patch: typeof file.patch === "string" ? file.patch : undefined, patchTruncated: file.patchTruncated === true }];
+	});
+}
+
+function reviewPaths(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((entry) => typeof entry === "string" ? [entry] : entry && typeof entry === "object" && typeof (entry as { path?: unknown }).path === "string" ? [(entry as { path: string }).path] : []);
+}
+
+function truncationNote(value: unknown): string | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const record = value as { truncated?: unknown; bytes?: unknown };
+	if (record.truncated !== true) return undefined;
+	const bytes = typeof record.bytes === "number" ? ` (${formatBytes(record.bytes)})` : "";
+	return `This payload${bytes} was larger than AO stores, so it was not kept.`;
+}
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function lastLine(value: string): string { return value.trimEnd().split("\n").at(-1) ?? ""; }
+
+function activityMeta(activity: ConversationActivity): { icon: keyof typeof Feather.glyphMap; prefix?: string; color(t: Theme): string } {
+	switch (activity.activityKind) {
+		case "command": return { icon: "terminal", color: (t) => activity.status === "failed" ? t.red : t.textTertiary };
+		case "file_change": return { icon: "edit-3", prefix: "Changed", color: (t) => t.accent };
+		case "mcp_tool": return { icon: "tool", prefix: activity.detail?.server ? `${activity.detail.server} ·` : "MCP ·", color: (t) => t.textSecondary };
+		case "auto_review": return { icon: "shield", prefix: "Reviewed", color: (t) => t.green };
+		default: return { icon: "activity", color: (t) => t.textTertiary };
+	}
+}
+
+function elapsed(start?: string, end?: string): string | undefined { if (!start || !end) return undefined; const ms = Date.parse(end) - Date.parse(start); if (!Number.isFinite(ms) || ms < 0) return undefined; const seconds = Math.round(ms / 1000); return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`; }
+function formatTokens(value: number): string { return value >= 1_000 ? `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k` : String(value); }
+const makeStyles = (t: Theme) => StyleSheet.create({
+	timelineWrap: { flex: 1, position: "relative", backgroundColor: t.bgBase },
+	emptySurface: { flex: 1, justifyContent: "center" },
+	list: { flex: 1, backgroundColor: t.bgBase },
+	content: { paddingHorizontal: space.xl, paddingTop: space.md, paddingBottom: space.xxxl },
+	older: { alignSelf: "center", flexDirection: "row", gap: space.xs, alignItems: "center", paddingHorizontal: space.md, paddingVertical: space.sm, marginBottom: space.md },
+	olderText: { fontFamily: "Geist_400Regular", color: t.textTertiary, fontSize: type.caption1.fontSize },
+	userRow: { alignItems: "flex-end", paddingTop: space.lg, paddingBottom: space.sm },
+	userBubble: { maxWidth: "88%", backgroundColor: userMessageSurfaceStyle(t).backgroundColor, borderRadius: 20, borderCurve: "continuous", paddingHorizontal: space.lg, paddingVertical: space.md },
+	userText: { fontFamily: "Geist_400Regular", color: userMessageSurfaceStyle(t).foregroundColor, fontSize: type.callout.fontSize, lineHeight: type.callout.lineHeight },
+	delivery: { fontFamily: "Geist_400Regular", marginTop: space.xxs, color: t.amber, fontSize: type.caption2.fontSize },
+	attachments: { flexDirection: "row", flexWrap: "wrap", gap: space.xs },
+	attachmentsSpaced: { marginTop: space.sm },
+	attachmentTile: { overflow: "hidden", borderRadius: 8, backgroundColor: t.bgColumn },
+	attachmentTileImage: { width: "100%", height: "100%" },
+	viewer: { flex: 1, backgroundColor: "rgba(0, 0, 0, 0.94)" },
+	viewerClose: { position: "absolute", right: 16, width: 36, height: 36, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255, 255, 255, 0.16)" },
+	// alignSelf keeps a chip its own height next to a tile: the row container's
+	// default stretch would otherwise blow it up to the tile's 104/160px.
+	attachmentChip: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: space.xs, borderRadius: 8, borderWidth: 1, borderColor: t.borderSubtle, paddingHorizontal: space.sm, paddingVertical: space.xs },
+	attachmentName: { fontFamily: "Geist_400Regular", flexShrink: 1, color: t.textSecondary, fontSize: type.caption1.fontSize },
+	attachmentRetry: { fontFamily: "Geist_600SemiBold", color: t.accent, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	originMessage: { marginVertical: space.sm, borderLeftWidth: 2, borderLeftColor: t.borderStrong, paddingLeft: space.sm, gap: space.xxs },
+	originHeader: { flexDirection: "row", alignItems: "center", gap: space.xxs },
+	originLabel: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.caption2.fontSize, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.7 },
+	originText: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.subheadline.fontSize, lineHeight: type.subheadline.lineHeight },
+	originMore: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: space.xxs, paddingVertical: space.xxs },
+	originMoreText: { fontFamily: "Geist_600SemiBold", color: t.accent, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	steerBubble: { backgroundColor: t.bgSubtle },
+	steerLabel: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.caption2.fontSize, letterSpacing: 1, fontWeight: "600", marginBottom: space.hair },
+	assistantRow: { paddingVertical: space.lg },
+	sender: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.caption2.fontSize, fontWeight: "600", marginBottom: space.xxs },
+	copy: { alignSelf: "flex-start", alignItems: "center", justifyContent: "center", width: 28, height: 28, marginTop: space.hair, marginLeft: -7 },
+	jump: { position: "absolute", right: 14, bottom: 12, minHeight: 36, flexDirection: "row", alignItems: "center", gap: space.xs, paddingHorizontal: space.md, borderRadius: 16, backgroundColor: jumpToLatestColors(t).backgroundColor, borderWidth: 1, borderColor: t.borderStrong },
+	jumpText: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	systemSignal: { marginVertical: space.xs, flexDirection: "row", alignItems: "flex-start", gap: space.sm, borderWidth: 1, borderColor: t.borderDefault, borderRadius: 8, backgroundColor: t.bgSurface, padding: space.sm },
+	systemTitle: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	systemDetail: { fontFamily: "Geist_400Regular", color: t.textTertiary, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight, marginTop: space.hair },
+	activityWrap: { paddingVertical: space.hair },
+	activityRow: { minHeight: 34, flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: space.xs },
+	activitySummary: { flex: 1, color: t.textSecondary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontFamily: t.fontMono },
+	server: { color: t.textTertiary, fontSize: type.caption2.fontSize, fontFamily: t.fontMono },
+	activityProgress: { fontFamily: "Geist_400Regular", maxWidth: "28%", color: t.textFaint, fontSize: type.caption2.fontSize },
+	activityStopped: { fontFamily: "Geist_600SemiBold", color: t.textFaint, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	activityDetail: { marginLeft: space.xl, marginBottom: space.xs, borderLeftWidth: 1, borderLeftColor: t.borderSubtle, paddingLeft: space.md, gap: space.xs },
+	terminalInput: { gap: space.xxs },
+	terminalInputTitle: { flexDirection: "row", alignItems: "center", gap: space.xxs },
+	reviewDecision: { fontFamily: "Geist_600SemiBold", color: t.green, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	risk: { fontFamily: "Geist_600SemiBold", color: t.amber, fontSize: type.caption2.fontSize, fontWeight: "600", textTransform: "uppercase" },
+	reviewRationale: { fontFamily: "Geist_400Regular", color: t.textPrimary, backgroundColor: t.bgColumn, borderRadius: 8, padding: space.sm, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	runWrap: { paddingVertical: space.hair },
+	runSummary: { minHeight: 34, flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: space.xs },
+	runText: { fontFamily: "Geist_400Regular", flex: 1, color: t.textTertiary, fontSize: type.caption1.fontSize },
+	runFailed: { fontFamily: "Geist_600SemiBold", color: t.red, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	runStopped: { fontFamily: "Geist_600SemiBold", color: t.textFaint, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	runDetail: { marginBottom: space.xs, borderRadius: 8, borderWidth: 1, borderColor: t.borderSubtle, backgroundColor: t.bgSubtle, paddingHorizontal: space.sm, paddingVertical: space.hair },
+	subagent: { marginLeft: space.xl, marginBottom: space.xxs, borderLeftWidth: 1, borderLeftColor: t.borderStrong, paddingLeft: space.sm },
+	subagentHeader: { minHeight: 34, flexDirection: "row", alignItems: "center", gap: space.xs, paddingVertical: space.xs },
+	subagentLabel: { fontFamily: "Geist_400Regular", flex: 1, color: t.textFaint, fontSize: type.caption2.fontSize, letterSpacing: 0.8 },
+	detailCopy: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight },
+	labelValue: { flexDirection: "row", gap: space.sm },
+	detailLabel: { width: 30, color: t.textFaint, fontSize: type.caption2.fontSize, fontFamily: t.fontMono },
+	detailValue: { flex: 1, color: t.textSecondary, fontSize: type.caption2.fontSize, fontFamily: t.fontMono },
+	output: { color: t.textSecondary, backgroundColor: t.bgColumn, borderRadius: 8, padding: space.sm, fontFamily: t.fontMono, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	partial: { fontFamily: "Geist_400Regular", color: t.textFaint, fontSize: type.caption2.fontSize },
+	turnWrap: { paddingTop: space.sm, paddingBottom: space.lg, gap: space.sm },
+	turnLine: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.sm },
+	turnState: { fontFamily: "Geist_500Medium", color: t.textTertiary, fontSize: type.caption1.fontSize, fontWeight: "500" },
+	turnError: { fontFamily: "Geist_400Regular", color: t.red, fontSize: type.caption1.fontSize, lineHeight: type.caption1.lineHeight, textAlign: "right" },
+	rollbackConfirm: { marginTop: space.xxs, backgroundColor: t.bgElevated, borderWidth: 1, borderColor: t.borderDefault, borderRadius: 12, padding: space.md, gap: space.xs },
+	rollbackTitle: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontWeight: "600", fontSize: type.footnote.fontSize },
+	rollbackCopy: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.caption1.fontSize, lineHeight: type.caption1.lineHeight },
+	planCard: { backgroundColor: t.bgSurface, borderRadius: 12, borderCurve: "continuous", borderWidth: StyleSheet.hairlineWidth, borderColor: t.borderDefault, overflow: "hidden" },
+	planHeader: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: space.sm, paddingHorizontal: space.md },
+	planTitle: { fontFamily: "Geist_600SemiBold", flex: 1, color: t.textSecondary, fontSize: type.caption1.fontSize, fontWeight: "600" },
+	planLive: { fontFamily: "Geist_600SemiBold", color: t.orange, fontSize: type.caption2.fontSize, letterSpacing: 0.7, fontWeight: "600" },
+	planCount: { color: t.textFaint, fontFamily: t.fontMono, fontSize: type.caption2.fontSize },
+	planBody: { paddingHorizontal: space.sm, paddingBottom: space.sm, gap: space.xs },
+	planStep: { flexDirection: "row", alignItems: "flex-start", gap: space.sm },
+	planStepText: { fontFamily: "Geist_400Regular", flex: 1, color: t.textSecondary, fontSize: type.caption1.fontSize, lineHeight: type.caption1.lineHeight },
+	planStepState: { fontFamily: "Geist_400Regular", color: t.textFaint, fontSize: type.caption2.fontSize, textTransform: "uppercase" },
+	planDone: { color: t.textTertiary, textDecorationLine: "line-through" },
+	fileBody: { paddingHorizontal: space.sm, paddingBottom: space.sm, gap: space.xxs },
+	fileRow: { flexDirection: "row", alignItems: "center", gap: space.xs },
+	fileMark: { width: 13, fontFamily: t.fontMono, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	filePath: { flex: 1, color: t.textSecondary, fontFamily: t.fontMono, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	fileStat: { color: t.textFaint, fontFamily: t.fontMono, fontSize: type.caption2.fontSize },
+	approvalRequest: { marginVertical: space.md, paddingHorizontal: space.hair, paddingTop: space.xs, paddingBottom: space.lg, gap: space.md },
+	approvalStatus: { flexDirection: "row", alignItems: "center", gap: space.sm },
+	approvalDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: t.amber },
+	approvalStatusText: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.footnote.fontSize, fontWeight: "600" },
+	approvalCommandSurface: { flexDirection: "row", alignItems: "flex-start", gap: space.sm, borderRadius: 12, borderCurve: "continuous", backgroundColor: t.bgSubtle, paddingHorizontal: space.md, paddingVertical: space.md },
+	approvalActions: { minHeight: 36, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: space.xxs, paddingTop: space.none },
+	approvalResolved: { minHeight: 38, marginVertical: space.sm, flexDirection: "row", alignItems: "center", gap: space.xs, paddingHorizontal: space.hair },
+	approvalResolvedLabel: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.caption2.fontSize, fontWeight: "600" },
+	approvalResolvedCommand: { flex: 1, color: t.textFaint, fontSize: type.caption2.fontSize, fontFamily: t.fontMono },
+	requestCard: { marginVertical: space.sm, backgroundColor: t.bgSurface, borderWidth: StyleSheet.hairlineWidth, borderColor: t.borderDefault, borderRadius: 16, borderCurve: "continuous", padding: space.md, gap: space.md },
+	requestCardResolved: { backgroundColor: t.bgSubtle },
+	requestTitle: { flexDirection: "row", alignItems: "center", gap: space.sm },
+	requestIcon: { width: 32, height: 32, borderRadius: 8, alignItems: "center", justifyContent: "center" },
+	requestHeading: { fontFamily: "Geist_600SemiBold", flex: 1, color: t.textPrimary, fontSize: type.footnote.fontSize, fontWeight: "600" },
+	requestBadge: { borderRadius: 8, paddingHorizontal: space.sm, paddingVertical: space.xxs },
+	requestBadgeText: { fontFamily: "Geist_600SemiBold", fontSize: type.caption2.fontSize, fontWeight: "600" },
+	requestCopy: { fontFamily: "Geist_400Regular", color: t.textSecondary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight },
+	inputRequest: { marginVertical: space.md, paddingHorizontal: space.hair, paddingTop: space.xs, paddingBottom: space.xl, gap: space.md },
+	inputRequestStatus: { flexDirection: "row", alignItems: "center", gap: space.sm },
+	inputRequestDot: { width: 7, height: 7, borderRadius: 4 },
+	inputRequestStatusText: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.caption1.fontSize, fontWeight: "600" },
+	inputActions: { minHeight: 36, flexDirection: "row", alignItems: "center", gap: space.hair, paddingTop: space.hair },
+	requestCommand: { flex: 1, color: t.textPrimary, fontFamily: t.fontMono, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	actions: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: space.sm, flexWrap: "wrap", paddingTop: space.hair },
+	action: { minHeight: 44, justifyContent: "center", borderRadius: 12, borderCurve: "continuous", paddingHorizontal: space.lg, borderWidth: StyleSheet.hairlineWidth, borderColor: t.borderDefault },
+	actionLabel: { fontFamily: "Geist_600SemiBold", fontSize: type.caption1.fontSize, fontWeight: "600" },
+	actionHint: { fontFamily: "Geist_400Regular", maxWidth: 180, color: t.textTertiary, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight, marginTop: space.hair },
+	form: { gap: space.sm },
+	field: { gap: space.xs },
+	inputEyebrow: { fontFamily: "Geist_600SemiBold", color: t.textTertiary, fontSize: type.caption2.fontSize, fontWeight: "600", letterSpacing: 0.7, textTransform: "uppercase" },
+	inputQuestion: { fontFamily: "Geist_500Medium", color: t.textPrimary, fontSize: type.callout.fontSize, lineHeight: type.callout.lineHeight, fontWeight: "500" },
+	inputLabel: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.caption1.fontSize, fontWeight: "600" },
+	inputHint: { fontFamily: "Geist_400Regular", color: t.textTertiary, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	switchRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+	urlBox: { backgroundColor: t.bgColumn, borderRadius: 8, padding: space.sm },
+	urlText: { color: t.textSecondary, fontFamily: t.fontMono, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	validation: { fontFamily: "Geist_400Regular", color: t.red, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	compaction: { alignSelf: "center", flexDirection: "row", alignItems: "center", gap: space.xs, marginVertical: space.sm, paddingHorizontal: space.sm, paddingVertical: space.xs, borderRadius: 12, backgroundColor: t.bgSubtle },
+	compactionText: { fontFamily: "Geist_400Regular", color: t.textFaint, fontSize: type.caption2.fontSize, letterSpacing: 1 },
+	errorCard: { marginVertical: space.sm, flexDirection: "row", gap: space.sm, backgroundColor: t.tintRed, borderRadius: 12, borderCurve: "continuous", borderWidth: StyleSheet.hairlineWidth, padding: space.md },
+	errorTitle: { fontFamily: "Geist_600SemiBold", color: t.red, fontSize: type.caption1.fontSize, fontWeight: "600" },
+	errorCopy: { fontFamily: "Geist_400Regular", marginTop: space.xxs, color: t.textSecondary, fontSize: type.caption2.fontSize, lineHeight: type.caption2.lineHeight },
+	empty: { paddingVertical: 90, alignItems: "center", paddingHorizontal: space.xxl },
+	emptyMascot: { marginBottom: space.lg },
+	emptyTitle: { fontFamily: "Geist_600SemiBold", color: t.textPrimary, fontSize: type.body.fontSize, fontWeight: "600" },
+});

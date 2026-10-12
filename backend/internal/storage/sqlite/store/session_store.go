@@ -1,0 +1,1143 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
+)
+
+// ---- sessions ----
+
+// CreateSession assigns a per-project identity or a global standalone identity
+// and inserts the record. The next-num read and insert share writeMu, so two
+// concurrent creates cannot collide.
+func (s *Store) CreateSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	created, _, err := s.createSessionLocked(ctx, rec)
+	return created, err
+}
+
+// CreateClientRequestSession atomically decides which session owns a request
+// key. The caller launches only when fresh is true.
+func (s *Store) CreateClientRequestSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error) {
+	if rec.ClientRequestID == "" || rec.ClientRequestHash == "" {
+		return domain.SessionRecord{}, false, fmt.Errorf("client request id and hash are required")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.createSessionLocked(ctx, rec)
+}
+
+// GetSessionByClientRequestID finds the session created for a retryable request.
+func (s *Store) GetSessionByClientRequestID(ctx context.Context, key string) (domain.SessionRecord, bool, error) {
+	rec, ok, err := s.getSessionByClientRequestID(ctx, s.qr, key)
+	if err != nil || !ok {
+		return rec, ok, err
+	}
+	rec, err = s.hydrateProviderSession(ctx, rec)
+	return rec, ok, err
+}
+
+func (s *Store) getSessionByClientRequestID(ctx context.Context, q *gen.Queries, key string) (domain.SessionRecord, bool, error) {
+	row, err := q.GetClientRequestSession(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SessionRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("find client request %s: %w", key, err)
+	}
+	session, err := q.GetSession(ctx, row.ID)
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("load client request session %s: %w", row.ID, err)
+	}
+	rec := rowToRecord(session)
+	rec.ClientRequestID = key
+	rec.ClientRequestHash = row.ClientRequestHash
+	rec.ClientRequestCommitted = row.ClientRequestCommitted
+	return rec, true, nil
+}
+
+// CommitClientRequestSession marks a successfully launched session replayable.
+func (s *Store) CommitClientRequestSession(ctx context.Context, id domain.SessionID) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.CommitClientRequestSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("commit client request session %s: %w", id, err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("client request session %s is missing", id)
+	}
+	return nil
+}
+
+// CreateAutomationSession reports whether it inserted the seed. Callers must
+// not continue launching when fresh=false unless the returned row carries the
+// durable launch-complete marker.
+func (s *Store) CreateAutomationSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error) {
+	if rec.AutomationRunID == nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("automation run id is required")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.createSessionLocked(ctx, rec)
+}
+
+func (s *Store) createSessionLocked(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, bool, error) {
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return rec, false, err
+	}
+	defer tx.Rollback()
+	q := gen.New(tx)
+	if rec.ClientRequestID != "" {
+		existing, found, err := s.getSessionByClientRequestID(ctx, q, rec.ClientRequestID)
+		if err != nil || found {
+			return existing, false, err
+		}
+	}
+	if rec.AutomationRunID != nil {
+		existing, err := q.GetSessionByAutomationRunID(ctx, rec.AutomationRunID)
+		if err == nil {
+			return rowToRecord(gen.GetSessionRow(existing)), false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return domain.SessionRecord{}, false, fmt.Errorf("find session for automation run %s: %w", *rec.AutomationRunID, err)
+		}
+	}
+
+	var num int64
+	prefix := string(rec.ProjectID)
+	if rec.ProjectID == "" {
+		num, err = q.NextStandaloneSessionNum(ctx)
+		prefix = "standalone"
+	} else {
+		num, err = q.NextSessionNum(ctx, optionalProjectID(rec.ProjectID))
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("next session num for %s: %w", rec.ProjectID, err)
+	}
+	for {
+		rec.ID = domain.SessionID(fmt.Sprintf("%s-%d", prefix, num))
+		exists, err := q.SessionIDExists(ctx, rec.ID)
+		if err != nil {
+			return domain.SessionRecord{}, false, fmt.Errorf("check session id %s: %w", rec.ID, err)
+		}
+		if !exists {
+			break
+		}
+		num++
+	}
+	if err := q.InsertSession(ctx, recordToInsert(rec, num)); err != nil {
+		if rec.ClientRequestID != "" {
+			existing, found, reloadErr := s.getSessionByClientRequestID(ctx, q, rec.ClientRequestID)
+			if reloadErr == nil && found {
+				return existing, false, nil
+			}
+		}
+		if rec.AutomationRunID != nil {
+			existing, reloadErr := q.GetSessionByAutomationRunID(ctx, rec.AutomationRunID)
+			if reloadErr == nil {
+				return rowToRecord(gen.GetSessionRow(existing)), false, nil
+			}
+		}
+		return domain.SessionRecord{}, false, fmt.Errorf("insert session %s: %w", rec.ID, err)
+	}
+	if rec.Metadata.ProviderContext != nil {
+		data, err := json.Marshal(rec.Metadata.ProviderContext)
+		if err != nil {
+			return rec, false, err
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE sessions SET provider_context=? WHERE id=?", string(data), rec.ID); err != nil {
+			return rec, false, err
+		}
+		rec.ProviderProfile = rec.Metadata.ProviderContext.Profile
+		rec.ProviderLabel = rec.Metadata.ProviderContext.Label
+	}
+	if err := tx.Commit(); err != nil {
+		return rec, false, err
+	}
+	return rec, true, nil
+}
+
+// SetSessionProvisionedWorkspace records the worktree as soon as it exists,
+// ahead of the controller commit that writes the rest of the row.
+func (s *Store) SetSessionProvisionedWorkspace(
+	ctx context.Context,
+	id domain.SessionID,
+	branch, workspacePath, workspaceRepoPath string,
+	now time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionProvisionedWorkspace(ctx, gen.SetSessionProvisionedWorkspaceParams{
+		Branch:            branch,
+		WorkspacePath:     workspacePath,
+		WorkspaceRepoPath: workspaceRepoPath,
+		UpdatedAt:         now,
+		ID:                id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("record provisioned workspace for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetTaskPreparationBase records the immutable base only while the row is hidden.
+func (s *Store) SetTaskPreparationBase(ctx context.Context, id domain.SessionID, baseSHA, baseRef string) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetTaskPreparationBase(ctx, gen.SetTaskPreparationBaseParams{
+		DiffBaseSha: baseSHA,
+		DiffBaseRef: baseRef,
+		ID:          id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("record task preparation base for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionProvisionState publishes an asynchronous Chat spawn's progress. It
+// writes only these two fields: the background start races the controller
+// commit, which owns the rest of the row.
+func (s *Store) SetSessionProvisionState(
+	ctx context.Context,
+	id domain.SessionID,
+	state domain.SessionProvisionState,
+	provisionError string,
+	now time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionProvisionState(ctx, gen.SetSessionProvisionStateParams{
+		ProvisionState: state.WithDefault(),
+		ProvisionError: provisionError,
+		UpdatedAt:      now,
+		ID:             id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set provision state for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionProvisionSteps publishes an asynchronous Chat start's checklist. Like
+// SetSessionProvisionState it writes only its own column.
+func (s *Store) SetSessionProvisionSteps(
+	ctx context.Context,
+	id domain.SessionID,
+	steps []domain.SessionProvisionStep,
+	now time.Time,
+) error {
+	raw, err := json.Marshal(steps)
+	if err != nil {
+		return fmt.Errorf("encode provision steps for %s: %w", id, err)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := s.qw.SetSessionProvisionSteps(ctx, gen.SetSessionProvisionStepsParams{
+		ProvisionSteps: string(raw),
+		UpdatedAt:      now,
+		ID:             id,
+	}); err != nil {
+		return fmt.Errorf("set provision steps for %s: %w", id, err)
+	}
+	return nil
+}
+
+// PromoteTaskPreparation makes a hidden speculative row visible without
+// touching workspace facts that may be published by the preparation goroutine.
+func (s *Store) PromoteTaskPreparation(ctx context.Context, id domain.SessionID, rec domain.SessionRecord) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	activity := normalActivity(rec.Activity, rec.UpdatedAt)
+	rows, err := s.qw.PromoteTaskPreparation(ctx, gen.PromoteTaskPreparationParams{
+		IssueID:            rec.IssueID,
+		Kind:               rec.Kind,
+		Harness:            rec.Harness,
+		AutoReviewEnabled:  rec.AutoReviewEnabled,
+		DisplayName:        rec.DisplayName,
+		ActivityState:      activity.State,
+		ActivityLastAt:     activity.LastActivityAt,
+		SessionMode:        domain.NormalizeSessionMode(rec.Mode),
+		Model:              rec.Metadata.Model,
+		Effort:             rec.Metadata.Effort,
+		SessionPermissions: string(rec.Metadata.Permissions),
+		CreatedAt:          rec.CreatedAt,
+		UpdatedAt:          rec.UpdatedAt,
+		AutoInjectReview:   rec.AutoInjectReview,
+		AutoInjectCI:       rec.AutoInjectCI,
+		ProvisionState:     rec.ProvisionState.WithDefault(),
+		ClientRequestID:    rec.ClientRequestID,
+		ClientRequestHash:  rec.ClientRequestHash,
+		ID:                 id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("promote task preparation %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// DeleteTaskPreparation removes only a row that has not been claimed.
+func (s *Store) DeleteTaskPreparation(ctx context.Context, id domain.SessionID) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin delete task preparation %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM change_log
+WHERE session_id = ?
+  AND EXISTS (SELECT 1 FROM sessions WHERE id = ? AND is_task_preparation = 1)`, id, id); err != nil {
+		return false, fmt.Errorf("delete task preparation %s change log: %w", id, err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ? AND is_task_preparation = 1`, id)
+	if err != nil {
+		return false, fmt.Errorf("delete task preparation %s: %w", id, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete task preparation %s rows affected: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit delete task preparation %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateSession writes the general mutable state of an existing session. The
+// provisioning state is owned by SetSessionProvisionState so stale lifecycle
+// snapshots cannot overwrite asynchronous start progress.
+func (s *Store) UpdateSession(ctx context.Context, rec domain.SessionRecord) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.qw.UpdateSession(ctx, recordToUpdate(rec))
+}
+
+// SetSessionHibernated changes only the durable sleep marker if the caller's
+// session snapshot is still current. Passing nil clears the marker on wake.
+func (s *Store) SetSessionHibernated(ctx context.Context, id domain.SessionID, expectedRevision int64, at *time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionHibernated(ctx, gen.SetSessionHibernatedParams{
+		HibernatedAt:     timePtrToNullTime(at),
+		ID:               id,
+		ExpectedRevision: expectedRevision,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set session hibernation for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateSessionModel changes only the selected model, leaving concurrent
+// lifecycle and controller ownership updates intact.
+func (s *Store) UpdateSessionModel(ctx context.Context, id domain.SessionID, model string) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateSessionModel(ctx, gen.UpdateSessionModelParams{
+		ID:    id,
+		Model: model,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update session model for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateSessionArtifactOutput changes only artifact_dir and
+// session_output_type, leaving concurrent lifecycle/controller/activity
+// writes intact. lifecycle.Manager.ReconcileSessionOutputType uses this
+// instead of a read-modify-write UpdateSession so a stale in-memory
+// SessionRecord read before a concurrent termination (or other update) can
+// never replay is_terminated, activity, runtime identity, or preview state
+// backwards over that newer write.
+func (s *Store) UpdateSessionArtifactOutput(ctx context.Context, id domain.SessionID, artifactDir string, outputType domain.SessionOutputType) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateSessionArtifactOutput(ctx, gen.UpdateSessionArtifactOutputParams{
+		ID:                id,
+		ArtifactDir:       artifactDir,
+		SessionOutputType: string(outputType),
+	})
+	if err != nil {
+		return false, fmt.Errorf("update session artifact output for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateBrowserCapabilityVerifier rotates only the verifier when the caller's
+// controller-owner snapshot is still current. It deliberately leaves every
+// other mutable session field, including user-visible recency, untouched.
+func (s *Store) UpdateBrowserCapabilityVerifier(
+	ctx context.Context,
+	id domain.SessionID,
+	expected domain.SessionControllerOwner,
+	verifier string,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateBrowserCapabilityVerifier(ctx, gen.UpdateBrowserCapabilityVerifierParams{
+		BrowserCapabilityVerifier:      verifier,
+		ID:                             id,
+		ExpectedHarness:                expected.Harness,
+		ExpectedSessionMode:            domain.NormalizeSessionMode(expected.Mode),
+		ExpectedIsTerminated:           expected.IsTerminated,
+		ExpectedRuntimeLaunchID:        expected.RuntimeLaunchID,
+		ExpectedAgentSessionID:         expected.AgentSessionID,
+		ExpectedAgentSessionIDLaunchID: expected.AgentSessionIDLaunchID,
+		ExpectedProviderConversationID: expected.ProviderConversationID,
+		ExpectedControllerGeneration:   expected.ControllerGeneration,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update browser capability verifier for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateSessionFromActivitySignal projects activity-derived session metadata
+// only when the signal still belongs to the session's active harness launch.
+func (s *Store) UpdateSessionFromActivitySignal(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	expectedRevision int64,
+) (bool, error) {
+	activity := normalActivity(rec.Activity, rec.UpdatedAt)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateSessionFromActivitySignal(ctx, gen.UpdateSessionFromActivitySignalParams{
+		ActivityState:                    activity.State,
+		ActivityLastAt:                   activity.LastActivityAt,
+		FirstSignalAt:                    timeToNullTime(rec.FirstSignalAt),
+		AgentSessionID:                   rec.Metadata.AgentSessionID,
+		AgentSessionIDLaunchID:           rec.Metadata.AgentSessionIDLaunchID,
+		NativeIdentityObservedAt:         timeToNullTime(rec.Metadata.NativeIdentityObservedAt),
+		LatestUserPrompt:                 rec.Metadata.LatestUserPrompt,
+		LatestUserPromptAt:               timeToNullTime(rec.Metadata.LatestUserPromptAt),
+		LatestAssistantUpdate:            rec.Metadata.LatestAssistantUpdate,
+		LatestAssistantUpdateAt:          timeToNullTime(rec.Metadata.LatestAssistantUpdateAt),
+		ConversationCheckpointState:      normalizedConversationCheckpointState(rec.Metadata),
+		ConversationCheckpointGeneration: rec.Metadata.ConversationCheckpointGeneration,
+		ConversationCheckpointNativeID:   rec.Metadata.ConversationCheckpointNativeID,
+		ConversationCheckpointTurnID:     rec.Metadata.ConversationCheckpointTurnID,
+		NativeCheckpointEvidence:         rec.Metadata.NativeCheckpointEvidence,
+		ConversationCheckpointUnsettled:  rec.Metadata.ConversationCheckpointUnsettled,
+		NativeTranscriptPath:             rec.Metadata.NativeTranscriptPath,
+		ClaudeActivityFacts:              rec.Metadata.ClaudeActivityFacts,
+		CodexActivityFacts:               rec.Metadata.CodexActivityFacts,
+		UpdatedAt:                        rec.UpdatedAt,
+		ID:                               rec.ID,
+		ExpectedRevision:                 expectedRevision,
+		ExpectedHarness:                  rec.Harness,
+		ExpectedSessionMode:              domain.NormalizeSessionMode(rec.Mode),
+		ExpectedRuntimeLaunchID:          rec.Metadata.RuntimeLaunchID,
+		ExpectedControllerGeneration:     rec.Metadata.ControllerGeneration,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update session %s from activity signal: %w", rec.ID, err)
+	}
+	return rows > 0, nil
+}
+
+// RecordSessionLatestUserPrompt persists pane-delivered user direction without
+// rewriting lifecycle ownership. Because the provider hook may be lost, the
+// same atomic write clears any prior assistant pairing and trusted checkpoint
+// provenance. An unresolved Stop boundary remains until a canonical main-turn
+// hook supplies the missing boundary evidence.
+func (s *Store) RecordSessionLatestUserPrompt(ctx context.Context, id domain.SessionID, prompt string, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RecordSessionLatestUserPrompt(ctx, gen.RecordSessionLatestUserPromptParams{
+		LatestUserPrompt: prompt,
+		UpdatedAt:        timeToNullTime(updatedAt),
+		ID:               id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("record latest user prompt for session %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// ClaimChatControllerGeneration makes generation the only Chat controller that
+// may project provider events for this session. The narrow update avoids writing
+// a stale full SessionRecord over lifecycle facts changed by another goroutine.
+func (s *Store) ClaimChatControllerGeneration(
+	ctx context.Context,
+	id domain.SessionID,
+	generation string,
+) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ClaimChatControllerGeneration(ctx, gen.ClaimChatControllerGenerationParams{
+		ControllerGeneration: generation,
+		ID:                   id,
+	})
+	if err != nil {
+		return fmt.Errorf("claim chat controller generation for %s: %w", id, err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("claim chat controller generation for %s: chat session not found", id)
+	}
+	return nil
+}
+
+// RenameSession updates only the user-facing display name for an existing
+// session. It returns ok=false when the session id does not exist. The
+// sessions_cdc_update trigger fans out a session_updated CDC event when the
+// display name actually changes.
+func (s *Store) RenameSession(ctx context.Context, id domain.SessionID, displayName string, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RenameSession(ctx, gen.RenameSessionParams{
+		ID:          id,
+		DisplayName: displayName,
+		UpdatedAt:   updatedAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("rename session %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// RenameSessionIfDisplayName applies a generated title only while the session
+// still carries AO's provisional name, so a concurrent human rename wins.
+func (s *Store) RenameSessionIfDisplayName(
+	ctx context.Context,
+	id domain.SessionID,
+	currentDisplayName, displayName string,
+	updatedAt time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RenameSessionIfDisplayName(ctx, gen.RenameSessionIfDisplayNameParams{
+		ID:                 id,
+		CurrentDisplayName: currentDisplayName,
+		DisplayName:        displayName,
+		UpdatedAt:          updatedAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("rename session %s if unchanged: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionPinned updates the pinned status of a session.
+func (s *Store) SetSessionPinned(ctx context.Context, id domain.SessionID, isPinned bool, pinnedAt *time.Time, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionPinned(ctx, gen.SetSessionPinnedParams{
+		ID:        id,
+		IsPinned:  isPinned,
+		PinnedAt:  timePtrToNullTime(pinnedAt),
+		UpdatedAt: updatedAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set session pinned %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionPreviewURL updates only the browser preview URL for an existing
+// session. It returns ok=false when the session id does not exist. The
+// sessions_cdc_update trigger fans out a session_updated CDC event when the
+// preview URL actually changes.
+func (s *Store) SetSessionPreviewURL(ctx context.Context, id domain.SessionID, previewURL string, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionPreviewURL(ctx, gen.SetSessionPreviewURLParams{
+		ID:         id,
+		PreviewURL: previewURL,
+		UpdatedAt:  updatedAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set preview url for session %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionTerminateOnPRMerge updates the user's merge-completion lifecycle
+// policy. It returns ok=false when the session id does not exist.
+func (s *Store) SetSessionTerminateOnPRMerge(ctx context.Context, id domain.SessionID, terminate bool, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionTerminateOnPRMerge(ctx, gen.SetSessionTerminateOnPRMergeParams{
+		ID:                 id,
+		TerminateOnPRMerge: terminate,
+		UpdatedAt:          updatedAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set terminate-on-pr-merge for session %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionAutoInjectReview persists a session's automatic review-injection policy.
+func (s *Store) SetSessionAutoInjectReview(ctx context.Context, id domain.SessionID, autoInject bool, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionAutoInjectReview(ctx, gen.SetSessionAutoInjectReviewParams{
+		ID:               id,
+		AutoInjectReview: autoInject,
+		UpdatedAt:        updatedAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set auto-inject review for session %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionAutoInjectCI persists the CI-failure injection policy for the
+// session and every PR currently owned by it. Future PRs still inherit this
+// value from the session row when first observed.
+func (s *Store) SetSessionAutoInjectCI(ctx context.Context, id domain.SessionID, autoInject bool, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var updated bool
+	err := s.inTx(ctx, fmt.Sprintf("set auto-inject CI for session %s", id), func(q *gen.Queries) error {
+		rows, err := q.SetSessionAutoInjectCI(ctx, gen.SetSessionAutoInjectCIParams{
+			ID:           id,
+			AutoInjectCI: autoInject,
+			UpdatedAt:    updatedAt,
+		})
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return nil
+		}
+		updated = true
+		if err := q.SetPRAutoInjectCIBySession(ctx, gen.SetPRAutoInjectCIBySessionParams{
+			AutoInjectCI: autoInject,
+			SessionID:    id,
+		}); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return updated, nil
+}
+
+// SetSessionReviewerConfig persists the reviewer preference for one session.
+func (s *Store) SetSessionReviewerConfig(
+	ctx context.Context,
+	id domain.SessionID,
+	harness domain.ReviewerHarness,
+	config domain.AgentConfig,
+	updatedAt time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	encoded, err := marshalAgentConfig(config)
+	if err != nil {
+		return false, fmt.Errorf("set reviewer config for %s: %w", id, err)
+	}
+	rows, err := s.qw.SetSessionReviewerConfig(ctx, gen.SetSessionReviewerConfigParams{
+		ReviewerHarness:     harness,
+		ReviewerAgentConfig: encoded,
+		UpdatedAt:           updatedAt,
+		ID:                  id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set reviewer config for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionAutoReview persists the daemon-side review automation toggle.
+func (s *Store) SetSessionAutoReview(ctx context.Context, id domain.SessionID, enabled bool, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionAutoReview(ctx, gen.SetSessionAutoReviewParams{
+		AutoReviewEnabled: enabled,
+		UpdatedAt:         updatedAt,
+		ID:                id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set auto review for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// DeleteSession removes a session row, but only if it is still in seed state
+// (no workspace, no runtime handle, no agent session id, no prompt, no handoff
+// metadata, and not already terminated). Rows that have observable spawn output are immutable
+// to preserve the no-resurrection guarantee — for those, callers fall back to
+// MarkTerminated (lifecycle.Manager) instead.
+//
+// The deletion runs in a transaction. It first probes seed state with
+// SessionIsSeed; only if that returns true does it clear the session's
+// change_log rows (required because change_log FKs sessions(id) without
+// ON DELETE CASCADE) and then delete the session row. For live or absent
+// sessions the transaction commits with no rows touched — critically, the
+// session_created / session_updated CDC events for live sessions are NOT
+// destroyed when callers (e.g. RollbackSpawn's delete-then-kill fallback)
+// invoke DeleteSession on a fully-spawned row.
+//
+// Returns deleted=true when a seed row was removed; deleted=false when the
+// session id did not match a seed row (either it never existed, or it had
+// already progressed past seed state). The latter case is benign — the caller
+// should fall back to MarkTerminated.
+func (s *Store) DeleteSession(ctx context.Context, id domain.SessionID) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin delete seed session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := s.qw.WithTx(tx)
+
+	isSeed, err := q.SessionIsSeed(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("delete seed session: probe seed state for %s: %w", id, err)
+	}
+	if !isSeed {
+		// Commit the empty tx so we don't leak a transaction. Critically, do
+		// NOT touch change_log here — for a live session that contains real
+		// session_created / session_updated CDC events.
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("delete seed session: commit no-op: %w", err)
+		}
+		return false, nil
+	}
+
+	// Drop change_log rows for this session id first so the FK doesn't reject
+	// the session DELETE. We do not touch project-level events (session_id IS
+	// NULL) — those belong to the project, not this session. Both this DELETE
+	// and the session DELETE below run via raw ExecContext to sidestep sqlc
+	// 1.31's SQLite-parser bug, which strips trailing `?` placeholders and
+	// string literals from DELETE statements (see queries/changelog.sql and
+	// queries/sessions.sql for the documented workaround context).
+	if _, err := tx.ExecContext(ctx, `DELETE FROM change_log WHERE session_id = ?`, id); err != nil {
+		return false, fmt.Errorf("delete seed session: clear change log for %s: %w", id, err)
+	}
+	res, err := tx.ExecContext(ctx, `
+DELETE FROM sessions
+WHERE id = ?
+  AND is_terminated = 0
+  AND workspace_path = ''
+  AND runtime_handle_id = ''
+  AND agent_session_id = ''
+  AND prompt = ''
+  AND latest_user_prompt = ''
+  AND latest_user_prompt_at IS NULL
+  AND latest_assistant_update = ''
+  AND native_transcript_path = ''`, id)
+	if err != nil {
+		return false, fmt.Errorf("delete seed session %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete seed session %s: rows affected: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("delete seed session: commit: %w", err)
+	}
+	return n > 0, nil
+}
+
+// GetSession returns the full record for a session, or ok=false if absent.
+func (s *Store) GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
+	row, err := s.qr.GetSession(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SessionRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("get session %s: %w", id, err)
+	}
+	rec, err := s.hydrateProviderSession(ctx, getSessionRowToRecord(row))
+	return rec, err == nil, err
+}
+
+// GetSessionByAutomationRunID returns the unique session spawned for a durable
+// automation occurrence, if one exists.
+func (s *Store) GetSessionByAutomationRunID(ctx context.Context, id domain.AutomationRunID) (domain.SessionRecord, bool, error) {
+	row, err := s.qr.GetSessionByAutomationRunID(ctx, &id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SessionRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("get automation session %s: %w", id, err)
+	}
+	rec, err := s.hydrateProviderSession(ctx, rowToRecord(gen.GetSessionRow(row)))
+	return rec, err == nil, err
+}
+
+// ListSessions returns every session in a project, ordered by num.
+func (s *Store) ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error) {
+	rows, err := s.qr.ListSessionsByProject(ctx, optionalProjectID(project))
+	if err != nil {
+		return nil, fmt.Errorf("list sessions for %s: %w", project, err)
+	}
+	return s.hydrateProviderSessions(ctx, mapListSessionsByProjectRows(rows))
+}
+
+// ListAllSessions returns every session across all projects.
+func (s *Store) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error) {
+	rows, err := s.qr.ListAllSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list all sessions: %w", err)
+	}
+	return s.hydrateProviderSessions(ctx, mapListAllSessionsRows(rows))
+}
+
+// ListChatHibernationCandidates avoids decoding inactive sessions and activity JSON.
+func (s *Store) ListChatHibernationCandidates(ctx context.Context) ([]domain.SessionID, error) {
+	ids, err := s.qr.ListChatHibernationCandidates(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list chat hibernation candidates: %w", err)
+	}
+	return ids, nil
+}
+
+func mapListSessionsByProjectRows(rows []gen.ListSessionsByProjectRow) []domain.SessionRecord {
+	out := make([]domain.SessionRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, listSessionsByProjectRowToRecord(r))
+	}
+	return out
+}
+
+func mapListAllSessionsRows(rows []gen.ListAllSessionsRow) []domain.SessionRecord {
+	out := make([]domain.SessionRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, listAllSessionsRowToRecord(r))
+	}
+	return out
+}
+
+func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
+	return domain.SessionRecord{
+		Revision:                  row.Revision,
+		ID:                        row.ID,
+		ProjectID:                 projectIDValue(row.ProjectID),
+		AutomationRunID:           row.AutomationRunID,
+		AutomationLaunchCompleted: row.AutomationLaunchCompleted,
+		IssueID:                   row.IssueID,
+		Kind:                      row.Kind,
+		Harness:                   row.Harness,
+		ReviewerHarness:           row.ReviewerHarness,
+		ReviewerConfig:            unmarshalAgentConfig(row.ReviewerAgentConfig),
+		AutoReviewEnabled:         row.AutoReviewEnabled,
+		DisplayName:               row.DisplayName,
+		Mode:                      domain.NormalizeSessionMode(row.SessionMode),
+		Activity: domain.Activity{
+			State:          row.ActivityState,
+			LastActivityAt: row.ActivityLastAt,
+		},
+		FirstSignalAt:      nullTimeToTime(row.FirstSignalAt),
+		IsTerminated:       row.IsTerminated,
+		HibernatedAt:       nullTimeToTimePtr(row.HibernatedAt),
+		IsPinned:           row.IsPinned,
+		PinnedAt:           nullTimeToTimePtr(row.PinnedAt),
+		TerminateOnPRMerge: row.TerminateOnPRMerge,
+		AutoInjectReview:   row.AutoInjectReview,
+		AutoInjectCI:       row.AutoInjectCI,
+		OutputType:         normalizeSessionOutputType(domain.SessionOutputType(row.SessionOutputType)),
+		Metadata: domain.SessionMetadata{
+			Branch:                           row.Branch,
+			WorkspacePath:                    row.WorkspacePath,
+			WorkspaceRepoPath:                row.WorkspaceRepoPath,
+			DiffBaseSHA:                      row.DiffBaseSha,
+			DiffBaseRef:                      row.DiffBaseRef,
+			RuntimeHandleID:                  row.RuntimeHandleID,
+			RuntimeLaunchID:                  row.RuntimeLaunchID,
+			AgentSessionID:                   row.AgentSessionID,
+			AgentSessionIDLaunchID:           row.AgentSessionIDLaunchID,
+			NativeIdentityObservedAt:         nullTimeToTime(row.NativeIdentityObservedAt),
+			Prompt:                           row.Prompt,
+			LatestUserPrompt:                 row.LatestUserPrompt,
+			LatestUserPromptAt:               nullTimeToTime(row.LatestUserPromptAt),
+			LatestInteractionAt:              nullTimeToTime(row.LatestInteractionAt),
+			LatestAssistantUpdate:            row.LatestAssistantUpdate,
+			LatestAssistantUpdateAt:          nullTimeToTime(row.LatestAssistantUpdateAt),
+			ConversationCheckpointState:      row.ConversationCheckpointState,
+			ConversationCheckpointGeneration: row.ConversationCheckpointGeneration,
+			ConversationCheckpointNativeID:   row.ConversationCheckpointNativeID,
+			ConversationCheckpointTurnID:     row.ConversationCheckpointTurnID,
+			NativeCheckpointEvidence:         row.NativeCheckpointEvidence,
+			ConversationCheckpointUnsettled:  row.ConversationCheckpointUnsettled,
+			NativeTranscriptPath:             row.NativeTranscriptPath,
+			ClaudeActivityFacts:              row.ClaudeActivityFacts,
+			CodexActivityFacts:               row.CodexActivityFacts,
+			PreviewURL:                       row.PreviewURL,
+			PreviewRevision:                  row.PreviewRevision,
+			ArtifactDir:                      row.ArtifactDir,
+			BrowserCapabilityVerifier:        row.BrowserCapabilityVerifier,
+			ProviderConversationID:           row.ProviderConversationID,
+			ControllerGeneration:             row.ControllerGeneration,
+			Model:                            row.Model,
+			Effort:                           row.Effort,
+			Permissions:                      domain.PermissionMode(row.SessionPermissions),
+		},
+		CleanupGeneration: row.CleanupGeneration,
+		CreatedAt:         row.CreatedAt,
+		UpdatedAt:         row.UpdatedAt,
+		ProvisionState:    row.ProvisionState.WithDefault(),
+		ProvisionError:    row.ProvisionError,
+		ProvisionSteps:    decodeProvisionSteps(row.ProvisionSteps),
+		IsTaskPreparation: row.IsTaskPreparation,
+	}
+}
+
+// decodeProvisionSteps reads the start-up checklist. A malformed value reads as
+// no checklist: it only drives display, and ProvisionState stays the start's
+// authoritative outcome.
+func decodeProvisionSteps(raw string) []domain.SessionProvisionStep {
+	if raw == "" {
+		return nil
+	}
+	var steps []domain.SessionProvisionStep
+	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
+		return nil
+	}
+	return steps
+}
+
+func getSessionRowToRecord(row gen.GetSessionRow) domain.SessionRecord {
+	return rowToRecord(row)
+}
+
+func listSessionsByProjectRowToRecord(row gen.ListSessionsByProjectRow) domain.SessionRecord {
+	return rowToRecord(gen.GetSessionRow(row))
+}
+
+func listAllSessionsRowToRecord(row gen.ListAllSessionsRow) domain.SessionRecord {
+	return rowToRecord(gen.GetSessionRow(row))
+}
+
+func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams {
+	activity := normalActivity(rec.Activity, rec.CreatedAt)
+	return gen.InsertSessionParams{
+		ID:                               rec.ID,
+		ProjectID:                        optionalProjectID(rec.ProjectID),
+		Num:                              num,
+		IssueID:                          rec.IssueID,
+		Kind:                             rec.Kind,
+		Harness:                          rec.Harness,
+		ReviewerHarness:                  rec.ReviewerHarness,
+		ReviewerAgentConfig:              mustMarshalAgentConfig(rec.ReviewerConfig),
+		AutoReviewEnabled:                rec.AutoReviewEnabled,
+		DisplayName:                      rec.DisplayName,
+		ActivityState:                    activity.State,
+		ActivityLastAt:                   activity.LastActivityAt,
+		FirstSignalAt:                    timeToNullTime(rec.FirstSignalAt),
+		IsTerminated:                     rec.IsTerminated,
+		IsPinned:                         rec.IsPinned,
+		PinnedAt:                         timePtrToNullTime(rec.PinnedAt),
+		Branch:                           rec.Metadata.Branch,
+		WorkspacePath:                    rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath:                rec.Metadata.WorkspaceRepoPath,
+		DiffBaseSha:                      rec.Metadata.DiffBaseSHA,
+		DiffBaseRef:                      rec.Metadata.DiffBaseRef,
+		RuntimeHandleID:                  rec.Metadata.RuntimeHandleID,
+		RuntimeLaunchID:                  rec.Metadata.RuntimeLaunchID,
+		AgentSessionID:                   rec.Metadata.AgentSessionID,
+		AgentSessionIDLaunchID:           rec.Metadata.AgentSessionIDLaunchID,
+		NativeIdentityObservedAt:         timeToNullTime(rec.Metadata.NativeIdentityObservedAt),
+		Prompt:                           rec.Metadata.Prompt,
+		LatestUserPrompt:                 rec.Metadata.LatestUserPrompt,
+		LatestUserPromptAt:               timeToNullTime(rec.Metadata.LatestUserPromptAt),
+		LatestAssistantUpdate:            rec.Metadata.LatestAssistantUpdate,
+		LatestAssistantUpdateAt:          timeToNullTime(rec.Metadata.LatestAssistantUpdateAt),
+		ConversationCheckpointState:      normalizedConversationCheckpointState(rec.Metadata),
+		ConversationCheckpointGeneration: rec.Metadata.ConversationCheckpointGeneration,
+		ConversationCheckpointNativeID:   rec.Metadata.ConversationCheckpointNativeID,
+		ConversationCheckpointTurnID:     rec.Metadata.ConversationCheckpointTurnID,
+		NativeCheckpointEvidence:         rec.Metadata.NativeCheckpointEvidence,
+		ConversationCheckpointUnsettled:  rec.Metadata.ConversationCheckpointUnsettled,
+		NativeTranscriptPath:             rec.Metadata.NativeTranscriptPath,
+		PreviewURL:                       rec.Metadata.PreviewURL,
+		PreviewRevision:                  rec.Metadata.PreviewRevision,
+		TerminateOnPRMerge:               rec.TerminateOnPRMerge,
+		AutoInjectReview:                 rec.AutoInjectReview,
+		AutoInjectCI:                     rec.AutoInjectCI,
+		CleanupGeneration:                rec.CleanupGeneration,
+		BrowserCapabilityVerifier:        rec.Metadata.BrowserCapabilityVerifier,
+		ArtifactDir:                      rec.Metadata.ArtifactDir,
+		SessionOutputType:                string(normalizeSessionOutputType(rec.OutputType)),
+		SessionMode:                      domain.NormalizeSessionMode(rec.Mode),
+		ProviderConversationID:           rec.Metadata.ProviderConversationID,
+		ControllerGeneration:             rec.Metadata.ControllerGeneration,
+		Model:                            rec.Metadata.Model,
+		Effort:                           rec.Metadata.Effort,
+		SessionPermissions:               string(rec.Metadata.Permissions),
+		CreatedAt:                        rec.CreatedAt,
+		UpdatedAt:                        rec.UpdatedAt,
+		ProvisionState:                   rec.ProvisionState.WithDefault(),
+		ProvisionError:                   rec.ProvisionError,
+		IsTaskPreparation:                rec.IsTaskPreparation,
+		AutomationRunID:                  rec.AutomationRunID,
+		AutomationLaunchCompleted:        rec.AutomationLaunchCompleted,
+		ClientRequestID:                  rec.ClientRequestID,
+		ClientRequestHash:                rec.ClientRequestHash,
+	}
+}
+
+// Permissions are immutable after insertion (or the focused legacy pin), so
+// generic session updates cannot overwrite them with a stale record.
+func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
+	activity := normalActivity(rec.Activity, rec.UpdatedAt)
+	return gen.UpdateSessionParams{
+		ID:                               rec.ID,
+		IssueID:                          rec.IssueID,
+		Kind:                             rec.Kind,
+		Harness:                          rec.Harness,
+		ReviewerHarness:                  rec.ReviewerHarness,
+		ReviewerAgentConfig:              mustMarshalAgentConfig(rec.ReviewerConfig),
+		AutoReviewEnabled:                rec.AutoReviewEnabled,
+		DisplayName:                      rec.DisplayName,
+		ActivityState:                    activity.State,
+		ActivityLastAt:                   activity.LastActivityAt,
+		FirstSignalAt:                    timeToNullTime(rec.FirstSignalAt),
+		IsTerminated:                     rec.IsTerminated,
+		IsPinned:                         rec.IsPinned,
+		PinnedAt:                         timePtrToNullTime(rec.PinnedAt),
+		Branch:                           rec.Metadata.Branch,
+		WorkspacePath:                    rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath:                rec.Metadata.WorkspaceRepoPath,
+		DiffBaseSha:                      rec.Metadata.DiffBaseSHA,
+		DiffBaseRef:                      rec.Metadata.DiffBaseRef,
+		RuntimeHandleID:                  rec.Metadata.RuntimeHandleID,
+		RuntimeLaunchID:                  rec.Metadata.RuntimeLaunchID,
+		AgentSessionID:                   rec.Metadata.AgentSessionID,
+		AgentSessionIDLaunchID:           rec.Metadata.AgentSessionIDLaunchID,
+		NativeIdentityObservedAt:         timeToNullTime(rec.Metadata.NativeIdentityObservedAt),
+		Prompt:                           rec.Metadata.Prompt,
+		LatestUserPrompt:                 rec.Metadata.LatestUserPrompt,
+		LatestUserPromptAt:               timeToNullTime(rec.Metadata.LatestUserPromptAt),
+		LatestAssistantUpdate:            rec.Metadata.LatestAssistantUpdate,
+		LatestAssistantUpdateAt:          timeToNullTime(rec.Metadata.LatestAssistantUpdateAt),
+		ConversationCheckpointState:      normalizedConversationCheckpointState(rec.Metadata),
+		ConversationCheckpointGeneration: rec.Metadata.ConversationCheckpointGeneration,
+		ConversationCheckpointNativeID:   rec.Metadata.ConversationCheckpointNativeID,
+		ConversationCheckpointTurnID:     rec.Metadata.ConversationCheckpointTurnID,
+		NativeCheckpointEvidence:         rec.Metadata.NativeCheckpointEvidence,
+		ConversationCheckpointUnsettled:  rec.Metadata.ConversationCheckpointUnsettled,
+		NativeTranscriptPath:             rec.Metadata.NativeTranscriptPath,
+		PreviewURL:                       rec.Metadata.PreviewURL,
+		PreviewRevision:                  rec.Metadata.PreviewRevision,
+		TerminateOnPRMerge:               rec.TerminateOnPRMerge,
+		AutoInjectReview:                 rec.AutoInjectReview,
+		AutoInjectCI:                     rec.AutoInjectCI,
+		CleanupGeneration:                rec.CleanupGeneration,
+		BrowserCapabilityVerifier:        rec.Metadata.BrowserCapabilityVerifier,
+		ProviderConversationID:           rec.Metadata.ProviderConversationID,
+		ControllerGeneration:             rec.Metadata.ControllerGeneration,
+		Model:                            rec.Metadata.Model,
+		Effort:                           rec.Metadata.Effort,
+		UpdatedAt:                        rec.UpdatedAt,
+		AutomationLaunchCompleted:        rec.AutomationLaunchCompleted,
+	}
+}
+
+func marshalAgentConfig(cfg domain.AgentConfig) (string, error) {
+	if cfg.IsZero() {
+		return "", nil
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal agent config: %w", err)
+	}
+	return string(data), nil
+}
+
+func mustMarshalAgentConfig(cfg domain.AgentConfig) string {
+	data, err := marshalAgentConfig(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
+func unmarshalAgentConfig(data string) domain.AgentConfig {
+	if data == "" {
+		return domain.AgentConfig{}
+	}
+	var cfg domain.AgentConfig
+	if err := json.Unmarshal([]byte(data), &cfg); err != nil {
+		return domain.AgentConfig{}
+	}
+	return cfg
+}
+
+func normalizedConversationCheckpointState(metadata domain.SessionMetadata) domain.ConversationCheckpointState {
+	if metadata.ConversationCheckpointState != "" {
+		return metadata.ConversationCheckpointState
+	}
+	if metadata.LatestUserPrompt != "" || metadata.LatestAssistantUpdate != "" {
+		return domain.ConversationCheckpointLegacy
+	}
+	return domain.ConversationCheckpointEmpty
+}
+
+func normalizeSessionOutputType(v domain.SessionOutputType) domain.SessionOutputType {
+	if v == "" {
+		return domain.SessionOutputNone
+	}
+	return v
+}
+
+// nullTimeToTime / timeToNullTime bridge the nullable first_signal_at column
+// to the domain's zero-time convention (zero = no signal received yet).
+func nullTimeToTime(t sql.NullTime) time.Time {
+	if !t.Valid {
+		return time.Time{}
+	}
+	return t.Time
+}
+
+func timeToNullTime(t time.Time) sql.NullTime {
+	if t.IsZero() {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: t, Valid: true}
+}
+
+func nullTimeToTimePtr(t sql.NullTime) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	return &t.Time
+}
+
+func timePtrToNullTime(t *time.Time) sql.NullTime {
+	if t == nil {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: *t, Valid: true}
+}
+
+func normalActivity(a domain.Activity, fallback time.Time) domain.Activity {
+	if a.State == "" {
+		a.State = domain.ActivityIdle
+	}
+	if a.LastActivityAt.IsZero() {
+		a.LastActivityAt = fallback
+	}
+	if a.LastActivityAt.IsZero() {
+		a.LastActivityAt = time.Now().UTC()
+	}
+	// The driver stores a time.Time by its String() form, so the zone and any
+	// monotonic reading survive into the column. Rows written from a local-zone
+	// clock ("… +0700 +07 m=+995.1") then stop comparing as timestamps against
+	// UTC rows, and activity_last_at is compared directly in SQL — the
+	// agent-switch source-stop predicate is one such comparison, and a mismatched
+	// row silently matches zero rows there. Normalize every writer's value here
+	// rather than trusting each caller's clock.
+	a.LastActivityAt = a.LastActivityAt.UTC()
+	return a
+}
