@@ -1168,9 +1168,12 @@ INSERT INTO conversation_activities (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: SettleConversationActivity :exec
+-- Both store callers require a nonempty provider item. State the partial unique
+-- index predicate explicitly so history replay seeks one row instead of scanning
+-- every activity in the conversation for each settlement.
 UPDATE conversation_activities
 SET status = ?, summary = ?, detail_json = ?, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND status <> 'cancelled';
+WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled';
 
 -- Resolving an approval matches on the provider's request id, so a card the user
 -- left on screen cannot answer a request that replaced it.
@@ -1325,11 +1328,13 @@ SELECT EXISTS(
 -- name: SettleConversationActivityStreamedText :execrows
 UPDATE conversation_activities
 SET streamed_text = ?, streamed_text_truncated = 0, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND status <> 'cancelled';
+WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled';
 
 -- name: SelectConversationActivityByProviderItem :one
+-- This lookup shares the nonempty provider-item contract and partial index with
+-- settlement; empty-ID activities are inserted without taking this path.
 SELECT * FROM conversation_activities
-WHERE conversation_id = ? AND provider_item_id = ?
+WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> ''
 LIMIT 1;
 
 -- name: SelectConversationContextResetSequence :one
