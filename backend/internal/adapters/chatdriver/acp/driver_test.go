@@ -2299,7 +2299,7 @@ func TestACPDriverParksAndResolvesStructuredElicitation(t *testing.T) {
 
 func multiSelectElicitationSchema() acpsdk.UnstableElicitationSchema {
 	return acpsdk.UnstableElicitationSchema{
-		Type:       acpsdk.UnstableElicitationSchemaTypeObject,
+		Type: acpsdk.UnstableElicitationSchemaTypeObject,
 		Properties: map[string]any{
 			"question_0": map[string]any{
 				"type":  "array",
