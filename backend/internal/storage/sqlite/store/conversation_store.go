@@ -1842,10 +1842,18 @@ func (s *Store) ReconcileConversationAuthentication(ctx context.Context, convers
 	if account.AuthChangedAt != nil && account.AuthChangedAt.After(cutoff) {
 		cutoff = *account.AuthChangedAt
 	}
-	turn, err := q.SelectVerifiedAuthenticationTurn(ctx, gen.SelectVerifiedAuthenticationTurnParams{
-		ConversationID: conversationID, Generation: generation, ProviderTurnID: providerTurnID,
-		AfterAt: sql.NullTime{Time: cutoff, Valid: true},
-	})
+	var turn gen.ConversationTurn
+	if providerTurnID != "" {
+		turn, err = q.SelectVerifiedAuthenticationProviderTurn(ctx, gen.SelectVerifiedAuthenticationProviderTurnParams{
+			ConversationID: conversationID, Generation: generation, ProviderTurnID: providerTurnID,
+			AfterAt: sql.NullTime{Time: cutoff, Valid: true},
+		})
+	} else {
+		turn, err = q.SelectVerifiedAuthenticationTurn(ctx, gen.SelectVerifiedAuthenticationTurnParams{
+			ConversationID: conversationID, Generation: generation, ProviderTurnID: providerTurnID,
+			AfterAt: sql.NullTime{Time: cutoff, Valid: true},
+		})
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return account, nil
 	}

@@ -1651,3 +1651,32 @@ WHERE t.conversation_id = sqlc.arg(conversation_id)
   AND t.started_at > sqlc.arg(after_at)
   AND t.completed_at > sqlc.arg(after_at)
 ORDER BY t.completed_at DESC LIMIT 1;
+
+-- Verify a named provider turn without decoding the whole active branch.
+-- Walk proofs newest-first: projection just archived the completion event.
+-- name: SelectVerifiedAuthenticationProviderTurn :one
+SELECT t.* FROM conversation_turns t
+JOIN conversations c ON c.id = t.conversation_id
+JOIN conversation_branches b ON b.id = c.active_branch_id
+WHERE t.conversation_id = sqlc.arg(conversation_id)
+  AND t.controller_generation = COALESCE(
+    (SELECT controller_generation FROM review WHERE id = c.current_review_id),
+    (SELECT controller_generation FROM sessions WHERE id = c.current_session_id))
+  AND (sqlc.arg(generation) = '' OR t.controller_generation = sqlc.arg(generation))
+  AND t.branch_id = c.active_branch_id
+  AND t.state = 'completed' AND t.rolled_back_at IS NULL
+  AND t.provider_turn_id <> ''
+  AND t.provider_turn_id = sqlc.arg(provider_turn_id)
+  AND t.started_at > sqlc.arg(after_at)
+  AND t.completed_at > sqlc.arg(after_at)
+  AND (
+    SELECT e.id FROM conversation_provider_events e
+    WHERE e.branch_id = c.active_branch_id AND e.conversation_id = c.id
+      AND e.method = 'turn.completed'
+      AND json_extract(e.payload_json, '$.providerTurnId') = t.provider_turn_id
+      AND json_extract(e.payload_json, '$.turnState') = 'completed'
+      AND json_extract(e.payload_json, '$.error') IS NULL
+      AND COALESCE(json_extract(e.payload_json, '$.providerConversationId'), '') IN ('', b.provider_conversation_id)
+    ORDER BY e.id DESC LIMIT 1
+  ) IS NOT NULL
+ORDER BY t.completed_at DESC LIMIT 1;

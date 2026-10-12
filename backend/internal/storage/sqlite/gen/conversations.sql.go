@@ -3572,6 +3572,74 @@ func (q *Queries) SelectRetryableConversationPrompt(ctx context.Context, arg Sel
 	return i, err
 }
 
+const selectVerifiedAuthenticationProviderTurn = `-- name: SelectVerifiedAuthenticationProviderTurn :one
+SELECT t.id, t.conversation_id, t.handled_by_session_id, t.provider_turn_id, t.controller_generation, t.state, t.error_message, t.requested_at, t.started_at, t.completed_at, t.diff_json, t.rolled_back_at, t.plan_json, t.branch_id, t.promotion_started_at, t.promoted_to_turn_id, t.retry_of_turn_id, t.handled_by_review_id FROM conversation_turns t
+JOIN conversations c ON c.id = t.conversation_id
+JOIN conversation_branches b ON b.id = c.active_branch_id
+WHERE t.conversation_id = ?1
+  AND t.controller_generation = COALESCE(
+    (SELECT controller_generation FROM review WHERE id = c.current_review_id),
+    (SELECT controller_generation FROM sessions WHERE id = c.current_session_id))
+  AND (?2 = '' OR t.controller_generation = ?2)
+  AND t.branch_id = c.active_branch_id
+  AND t.state = 'completed' AND t.rolled_back_at IS NULL
+  AND t.provider_turn_id <> ''
+  AND t.provider_turn_id = ?3
+  AND t.started_at > ?4
+  AND t.completed_at > ?4
+  AND (
+    SELECT e.id FROM conversation_provider_events e
+    WHERE e.branch_id = c.active_branch_id AND e.conversation_id = c.id
+      AND e.method = 'turn.completed'
+      AND json_extract(e.payload_json, '$.providerTurnId') = t.provider_turn_id
+      AND json_extract(e.payload_json, '$.turnState') = 'completed'
+      AND json_extract(e.payload_json, '$.error') IS NULL
+      AND COALESCE(json_extract(e.payload_json, '$.providerConversationId'), '') IN ('', b.provider_conversation_id)
+    ORDER BY e.id DESC LIMIT 1
+  ) IS NOT NULL
+ORDER BY t.completed_at DESC LIMIT 1
+`
+
+type SelectVerifiedAuthenticationProviderTurnParams struct {
+	ConversationID string
+	Generation     interface{}
+	ProviderTurnID string
+	AfterAt        sql.NullTime
+}
+
+// Verify a named provider turn without decoding the whole active branch.
+// Walk proofs newest-first: projection just archived the completion event.
+func (q *Queries) SelectVerifiedAuthenticationProviderTurn(ctx context.Context, arg SelectVerifiedAuthenticationProviderTurnParams) (ConversationTurn, error) {
+	row := q.db.QueryRowContext(ctx, selectVerifiedAuthenticationProviderTurn,
+		arg.ConversationID,
+		arg.Generation,
+		arg.ProviderTurnID,
+		arg.AfterAt,
+	)
+	var i ConversationTurn
+	err := row.Scan(
+		&i.ID,
+		&i.ConversationID,
+		&i.HandledBySessionID,
+		&i.ProviderTurnID,
+		&i.ControllerGeneration,
+		&i.State,
+		&i.ErrorMessage,
+		&i.RequestedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.DiffJson,
+		&i.RolledBackAt,
+		&i.PlanJson,
+		&i.BranchID,
+		&i.PromotionStartedAt,
+		&i.PromotedToTurnID,
+		&i.RetryOfTurnID,
+		&i.HandledByReviewID,
+	)
+	return i, err
+}
+
 const selectVerifiedAuthenticationTurn = `-- name: SelectVerifiedAuthenticationTurn :one
 WITH completion_proofs AS (
   SELECT DISTINCT e.conversation_id,

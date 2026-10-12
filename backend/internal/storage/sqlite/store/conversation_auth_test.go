@@ -281,7 +281,7 @@ var authenticationQueryProbe struct {
 	err   error
 }
 
-func authenticationQueryFixture(t *testing.T) (*sql.DB, string) {
+func authenticationQueryFixture(t *testing.T) (*sql.DB, string, string) {
 	t.Helper()
 	authenticationQueryProbe.once.Do(func() {
 		authenticationQueryProbe.err = sqliteDriver.RegisterScalarFunction("auth_query_test_probe", 1,
@@ -306,6 +306,7 @@ CREATE TABLE sessions(id TEXT PRIMARY KEY, controller_generation TEXT);
 CREATE TABLE review(id TEXT PRIMARY KEY, controller_generation TEXT);
 CREATE TABLE conversation_branches(id TEXT PRIMARY KEY, provider_conversation_id TEXT);
 CREATE TABLE conversation_provider_events(id INTEGER PRIMARY KEY, conversation_id TEXT, branch_id TEXT, method TEXT, payload_json TEXT);
+CREATE INDEX idx_conversation_provider_events_replay ON conversation_provider_events(conversation_id, id);
 CREATE INDEX idx_conversation_provider_events_branch ON conversation_provider_events(branch_id, id);
 CREATE TABLE conversation_turns(id TEXT PRIMARY KEY, conversation_id TEXT, controller_generation TEXT, branch_id TEXT,
  state TEXT, rolled_back_at INTEGER, provider_turn_id TEXT, started_at INTEGER, completed_at INTEGER, requested_at INTEGER DEFAULT 0);
@@ -322,16 +323,20 @@ INSERT INTO conversation_branches VALUES('branch', 'root-thread');`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, query, found := strings.Cut(string(source), "-- name: SelectVerifiedAuthenticationTurn :one\n")
-	if !found {
-		t.Fatal("authentication query missing")
+	var queries []string
+	for _, name := range []string{"SelectVerifiedAuthenticationTurn", "SelectVerifiedAuthenticationProviderTurn"} {
+		_, query, found := strings.Cut(string(source), "-- name: "+name+" :one\n")
+		if !found {
+			t.Fatalf("authentication query %s missing", name)
+		}
+		query, _, _ = strings.Cut(query, "-- name:")
+		query = strings.Replace(query, "SELECT t.*", "SELECT t.id", 1)
+		for _, arg := range []string{"conversation_id", "generation", "provider_turn_id", "after_at"} {
+			query = strings.ReplaceAll(query, "sqlc.arg("+arg+")", ":"+arg)
+		}
+		queries = append(queries, query)
 	}
-	query, _, _ = strings.Cut(query, "-- name:")
-	query = strings.Replace(query, "SELECT t.*", "SELECT t.id", 1)
-	for _, arg := range []string{"conversation_id", "generation", "provider_turn_id", "after_at"} {
-		query = strings.ReplaceAll(query, "sqlc.arg("+arg+")", ":"+arg)
-	}
-	return db, query
+	return db, queries[0], queries[1]
 }
 
 func authenticationQueryResult(t *testing.T, db *sql.DB, query, generation, providerTurn string, cutoff int) string {
@@ -397,7 +402,7 @@ func TestVerifiedAuthenticationQueryPreservesTruth(t *testing.T) {
 		{name: "latest-turn", mutation: `INSERT INTO conversation_turns(id,conversation_id,controller_generation,branch_id,state,rolled_back_at,provider_turn_id,started_at,completed_at) VALUES('latest','conversation','generation','branch','completed',NULL,'latest-provider',4,5); INSERT INTO conversation_provider_events VALUES(2,'conversation','branch','turn.completed','{"providerTurnId":"latest-provider","turnState":"completed"}')`, want: "latest"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, query := authenticationQueryFixture(t)
+			db, query, providerQuery := authenticationQueryFixture(t)
 			_, err := db.Exec(`INSERT INTO conversation_turns(id,conversation_id,controller_generation,branch_id,state,rolled_back_at,provider_turn_id,started_at,completed_at) VALUES('turn','conversation','generation','branch','completed',NULL,'provider-turn',2,3);
 INSERT INTO conversation_provider_events VALUES(1,'conversation','branch','turn.completed','{"providerTurnId":"provider-turn","turnState":"completed","providerConversationId":"root-thread"}');`)
 			if err != nil {
@@ -413,6 +418,20 @@ INSERT INTO conversation_provider_events VALUES(1,'conversation','branch','turn.
 					t.Fatalf("%s result=%q, want %q", name, got, tc.want)
 				}
 			}
+			providerTurn := tc.providerTurn
+			if providerTurn == "" {
+				providerTurn = "provider-turn"
+				switch tc.name {
+				case "latest-turn":
+					providerTurn = "latest-provider"
+				case "numeric-turn-id":
+					providerTurn = "123"
+				}
+			}
+			want := authenticationQueryResult(t, db, legacyAuthenticationQuery, tc.generation, providerTurn, tc.cutoff)
+			if got := authenticationQueryResult(t, db, providerQuery, tc.generation, providerTurn, tc.cutoff); got != want {
+				t.Fatalf("named provider turn %q result=%q, want %q", providerTurn, got, want)
+			}
 		})
 	}
 }
@@ -420,7 +439,7 @@ INSERT INTO conversation_provider_events VALUES(1,'conversation','branch','turn.
 func TestVerifiedAuthenticationQueryScansCompletionProofsOnce(t *testing.T) {
 	for _, size := range []int{128, 1024} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
-			db, query := authenticationQueryFixture(t)
+			db, query, _ := authenticationQueryFixture(t)
 			tx, err := db.Begin()
 			if err != nil {
 				t.Fatal(err)
@@ -475,6 +494,69 @@ func TestVerifiedAuthenticationQueryScansCompletionProofsOnce(t *testing.T) {
 				t.Fatalf("isolated proofs=%v, indexed turn=%v", isolatedProofs, indexedTurn)
 			}
 			t.Logf("turns=%d legacy_json_calls=%d proof_json_calls=%d", size, counts["legacy"], counts["proofs"])
+		})
+	}
+}
+
+func TestVerifiedAuthenticationProviderTurnQueryBoundsCompletionProofWork(t *testing.T) {
+	for _, size := range []int{128, 1024} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			db, query, providerQuery := authenticationQueryFixture(t)
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			for i := range size {
+				id := fmt.Sprintf("turn-%d", i)
+				if _, err := tx.Exec(`INSERT INTO conversation_turns(id,conversation_id,controller_generation,branch_id,state,rolled_back_at,provider_turn_id,started_at,completed_at) VALUES(?,'conversation','generation','branch','completed',NULL,?,?,?)`, id, id, i+1, i+2); err != nil {
+					t.Fatal(err)
+				}
+				payload := fmt.Sprintf(`{"providerTurnId":%q,"turnState":"completed"}`, id)
+				if _, err := tx.Exec(`INSERT INTO conversation_provider_events(conversation_id,branch_id,method,payload_json) VALUES('conversation','branch','turn.completed',?)`, payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			providerTurn := fmt.Sprintf("turn-%d", size-1)
+			counts := make(map[string]int64)
+			for name, q := range map[string]string{"proofs": query, "named": providerQuery} {
+				q = strings.ReplaceAll(q, "json_extract(e.payload_json,", "json_extract(auth_query_test_probe(e.payload_json),")
+				authenticationQueryProbe.calls.Store(0)
+				if got := authenticationQueryResult(t, db, q, "", providerTurn, 0); got != providerTurn {
+					t.Fatalf("%s selected %q, want %q", name, got, providerTurn)
+				}
+				counts[name] = authenticationQueryProbe.calls.Load()
+			}
+			if counts["named"] > 8 || counts["proofs"] < int64(size) {
+				t.Fatalf("JSON evaluations for %d turns: %v", size, counts)
+			}
+			rows, err := db.Query("EXPLAIN QUERY PLAN "+providerQuery, sql.Named("conversation_id", "conversation"),
+				sql.Named("generation", ""), sql.Named("provider_turn_id", providerTurn), sql.Named("after_at", 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = rows.Close() }()
+			var indexedTurn, indexedProof, scannedProof bool
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				indexedTurn = indexedTurn || strings.Contains(detail, "SEARCH t USING INDEX idx_conversation_turns_provider")
+				indexedProof = indexedProof || strings.Contains(detail, "SEARCH e USING INDEX idx_conversation_provider_events_branch") || strings.Contains(detail, "SEARCH e USING INDEX idx_conversation_provider_events_replay")
+				scannedProof = scannedProof || strings.Contains(detail, "SCAN e")
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if !indexedTurn || !indexedProof || scannedProof {
+				t.Fatalf("indexed turn=%v, indexed proof=%v, scanned proof=%v", indexedTurn, indexedProof, scannedProof)
+			}
+			t.Logf("turns=%d proof_json_calls=%d named_json_calls=%d", size, counts["proofs"], counts["named"])
 		})
 	}
 }
