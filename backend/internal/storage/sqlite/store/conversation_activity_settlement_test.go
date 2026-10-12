@@ -86,6 +86,13 @@ END;`)
 		}
 		_, query, _ = strings.Cut(query, "\n")
 		query, _, _ = strings.Cut(query, "-- name:")
+		lines := strings.Split(query, "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "--") {
+				lines[i] = ""
+			}
+		}
+		query = strings.Join(lines, "\n")
 		query, _, _ = strings.Cut(query, ";")
 		return query + ";"
 	}

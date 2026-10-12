@@ -1914,7 +1914,7 @@ func (q *Queries) SelectConversationActivitiesPage(ctx context.Context, arg Sele
 
 const selectConversationActivityByProviderItem = `-- name: SelectConversationActivityByProviderItem :one
 SELECT id, conversation_id, turn_id, sequence, revision, kind, status, summary, detail_json, request_id, provider_item_id, created_at, updated_at, command_output, command_output_truncated, streamed_text, streamed_text_truncated, branch_id FROM conversation_activities
-WHERE conversation_id = ? AND provider_item_id = ?
+WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> ''
 LIMIT 1
 `
 
@@ -1923,6 +1923,8 @@ type SelectConversationActivityByProviderItemParams struct {
 	ProviderItemID string
 }
 
+// This lookup shares the nonempty provider-item contract and partial index with
+// settlement; empty-ID activities are inserted without taking this path.
 func (q *Queries) SelectConversationActivityByProviderItem(ctx context.Context, arg SelectConversationActivityByProviderItemParams) (ConversationActivity, error) {
 	row := q.db.QueryRowContext(ctx, selectConversationActivityByProviderItem, arg.ConversationID, arg.ProviderItemID)
 	var i ConversationActivity
@@ -3647,7 +3649,7 @@ func (q *Queries) SelectVerifiedAuthenticationTurn(ctx context.Context, arg Sele
 const settleConversationActivity = `-- name: SettleConversationActivity :exec
 UPDATE conversation_activities
 SET status = ?, summary = ?, detail_json = ?, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND status <> 'cancelled'
+WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled'
 `
 
 type SettleConversationActivityParams struct {
@@ -3659,6 +3661,9 @@ type SettleConversationActivityParams struct {
 	ProviderItemID string
 }
 
+// Both store callers require a nonempty provider item. State the partial unique
+// index predicate explicitly so history replay seeks one row instead of scanning
+// every activity in the conversation for each settlement.
 func (q *Queries) SettleConversationActivity(ctx context.Context, arg SettleConversationActivityParams) error {
 	_, err := q.db.ExecContext(ctx, settleConversationActivity,
 		arg.Status,
@@ -3674,7 +3679,7 @@ func (q *Queries) SettleConversationActivity(ctx context.Context, arg SettleConv
 const settleConversationActivityStreamedText = `-- name: SettleConversationActivityStreamedText :execrows
 UPDATE conversation_activities
 SET streamed_text = ?, streamed_text_truncated = 0, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND status <> 'cancelled'
+WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled'
 `
 
 type SettleConversationActivityStreamedTextParams struct {
