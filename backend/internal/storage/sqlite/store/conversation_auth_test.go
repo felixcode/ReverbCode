@@ -351,8 +351,8 @@ func authenticationQueryResult(t *testing.T, db *sql.DB, query, generation, prov
 func TestVerifiedAuthenticationQueryPreservesTruth(t *testing.T) {
 	for _, tc := range []struct {
 		name, mutation, generation, providerTurn string
-		cutoff                                 int
-		want                                   string
+		cutoff                                   int
+		want                                     string
 	}{
 		{name: "current", want: "turn"},
 		{name: "matching-filters", generation: "generation", providerTurn: "provider-turn", want: "turn"},
