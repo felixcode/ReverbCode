@@ -1316,6 +1316,16 @@ SELECT EXISTS(
       AND status <> 'cancelled'
 );
 
+-- A replayed request keeps its existing activity, including any user answer.
+-- name: ConversationActivityExistsForRequest :one
+SELECT EXISTS(
+    SELECT 1
+    FROM conversation_activities
+    WHERE conversation_id = sqlc.arg(conversation_id)
+      AND request_id = sqlc.arg(request_id)
+      AND request_id <> ''
+);
+
 -- Replace the streamed text with the provider's settled version.
 --
 -- Reasoning arrives twice: as deltas while the model works, and as the item's own

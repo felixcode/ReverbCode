@@ -2544,6 +2544,22 @@ func (s *Store) UpsertActivity(
 		}
 	}
 
+	if activity.RequestID != "" {
+		// A persistent host replays a provider request still waiting after a daemon restart.
+		// Keep the existing row because it may already hold the user's answer.
+		found, err := q.ConversationActivityExistsForRequest(ctx,
+			gen.ConversationActivityExistsForRequestParams{
+				ConversationID: conversationID,
+				RequestID:      activity.RequestID,
+			})
+		if err != nil {
+			return fmt.Errorf("lookup activity request %s: %w", activity.RequestID, err)
+		}
+		if found {
+			return nil
+		}
+	}
+
 	turnID := s.turnIDFor(ctx, conversationID, providerTurnID)
 	return s.inTx(ctx, "insert activity", func(q *gen.Queries) error {
 		sequence, seqErr := q.NextConversationSequence(ctx, gen.NextConversationSequenceParams{

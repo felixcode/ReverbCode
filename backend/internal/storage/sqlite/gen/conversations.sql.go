@@ -577,6 +577,29 @@ func (q *Queries) ConversationActivityExistsForProviderItem(ctx context.Context,
 	return exists, err
 }
 
+const conversationActivityExistsForRequest = `-- name: ConversationActivityExistsForRequest :one
+SELECT EXISTS(
+    SELECT 1
+    FROM conversation_activities
+    WHERE conversation_id = ?1
+      AND request_id = ?2
+      AND request_id <> ''
+)
+`
+
+type ConversationActivityExistsForRequestParams struct {
+	ConversationID string
+	RequestID      string
+}
+
+// A replayed request keeps its existing activity, including any user answer.
+func (q *Queries) ConversationActivityExistsForRequest(ctx context.Context, arg ConversationActivityExistsForRequestParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, conversationActivityExistsForRequest, arg.ConversationID, arg.RequestID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const failOrphanedConversationActivities = `-- name: FailOrphanedConversationActivities :exec
 UPDATE conversation_activities
 SET status = 'failed', revision = revision + 1, updated_at = ?1

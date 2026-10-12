@@ -1242,6 +1242,68 @@ func TestConversationSnapshotRetainsProviderCost(t *testing.T) {
 	}
 }
 
+func TestUpsertActivityPreservesReplayedInputRequest(t *testing.T) {
+	s, _, conversation := conversationFixture(t)
+	ctx := context.Background()
+	input := domain.ConversationActivity{
+		ID:        "input-1",
+		Kind:      domain.ActivityKindUserInput,
+		Status:    domain.ActivityStatusPending,
+		Summary:   "Choose",
+		Detail:    []byte(`{}`),
+		RequestID: "req-1",
+	}
+	if err := s.UpsertActivity(ctx, conversation, "", input, histClock); err != nil {
+		t.Fatalf("seed input: %v", err)
+	}
+	original, err := s.LoadConversationSnapshot(ctx, conversation)
+	if err != nil {
+		t.Fatalf("load original snapshot: %v", err)
+	}
+	if len(original.Activities) != 1 || original.Activities[0].ID != input.ID ||
+		original.Activities[0].RequestID != "req-1" || original.Activities[0].ProviderItemID != "" {
+		t.Fatalf("original activities = %+v", original.Activities)
+	}
+
+	for i, status := range []domain.ActivityStatus{domain.ActivityStatusPending, domain.ActivityStatusResolved} {
+		if status == domain.ActivityStatusResolved {
+			if err := s.ResolveApproval(ctx, conversation, "req-1", `{"answer":"A"}`, histClock.Add(2*time.Minute)); err != nil {
+				t.Fatalf("resolve input: %v", err)
+			}
+		}
+		before, err := s.LoadConversationSnapshot(ctx, conversation)
+		if err != nil {
+			t.Fatalf("load snapshot before %s replay: %v", status, err)
+		}
+		if len(before.Activities) != 1 || before.Activities[0].Status != status {
+			t.Fatalf("activities before %s replay = %+v", status, before.Activities)
+		}
+		if status == domain.ActivityStatusResolved && string(before.Activities[0].Detail) != `{"answer":"A"}` {
+			t.Fatalf("resolved detail = %s", before.Activities[0].Detail)
+		}
+		replay := input
+		replay.ID = fmt.Sprintf("replayed-input-%d", i)
+		if err := s.UpsertActivity(ctx, conversation, "", replay, histClock.Add(time.Duration(2*i+1)*time.Minute)); err != nil {
+			t.Fatalf("replay %s input: %v", status, err)
+		}
+		after, err := s.LoadConversationSnapshot(ctx, conversation)
+		if err != nil {
+			t.Fatalf("load snapshot after %s replay: %v", status, err)
+		}
+		if len(after.Activities) != 1 || after.Activities[0].RequestID != "req-1" ||
+			after.Activities[0].ID != input.ID || after.Activities[0].Sequence != original.Activities[0].Sequence {
+			t.Fatalf("activities after %s replay = %+v", status, after.Activities)
+		}
+		if !reflect.DeepEqual(after.Activities, before.Activities) {
+			t.Fatalf("%s replay changed activity: got %+v, want %+v", status, after.Activities, before.Activities)
+		}
+		if after.Conversation.LatestSequence != original.Conversation.LatestSequence {
+			t.Fatalf("latest sequence after %s replay = %d, want %d", status,
+				after.Conversation.LatestSequence, original.Conversation.LatestSequence)
+		}
+	}
+}
+
 func TestFailPendingInputsDoesNotTouchApprovals(t *testing.T) {
 	s, _, conversation := conversationFixture(t)
 	ctx := context.Background()
