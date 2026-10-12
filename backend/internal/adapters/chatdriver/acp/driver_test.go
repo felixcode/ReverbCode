@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2292,6 +2293,191 @@ func TestACPDriverParksAndResolvesStructuredElicitation(t *testing.T) {
 	response := agent.elicitationResponse
 	agent.mu.Unlock()
 	if response.Accept == nil || response.Accept.Content["choice"] != "native" {
+		t.Fatalf("elicitation response = %#v", response)
+	}
+}
+
+func multiSelectElicitationSchema() acpsdk.UnstableElicitationSchema {
+	return acpsdk.UnstableElicitationSchema{
+		Type:       acpsdk.UnstableElicitationSchemaTypeObject,
+		Properties: map[string]any{
+			"question_0": map[string]any{
+				"type":  "array",
+				"title": "Scope",
+				"items": map[string]any{"anyOf": []any{
+					map[string]any{"const": "A", "title": "A"},
+					map[string]any{"const": "B", "title": "B"},
+				}},
+			},
+			"question_0_custom": map[string]any{
+				"type":  "string",
+				"title": "Other",
+				"_meta": map[string]any{"_askUserQuestionCustomAnswer": map[string]any{
+					"questionId": "question_0", "isCustomAnswer": true,
+				}},
+			},
+		},
+	}
+}
+
+func TestNormalizeInputResponse(t *testing.T) {
+	schema, err := schemaMap(multiSelectElicitationSchema())
+	if err != nil {
+		t.Fatalf("schemaMap: %v", err)
+	}
+	for _, tt := range []struct {
+		name        string
+		mode        ports.ChatInputMode
+		action      ports.ChatInputAction
+		content     map[string]any
+		wantContent map[string]any
+		wantErr     error
+	}{
+		{
+			name:        "bare offered option",
+			mode:        ports.ChatInputModeForm,
+			action:      ports.ChatInputActionAccept,
+			content:     map[string]any{"question_0": "A"},
+			wantContent: map[string]any{"question_0": []any{"A"}},
+		},
+		{
+			name:        "bare unoffered option",
+			mode:        ports.ChatInputModeForm,
+			action:      ports.ChatInputActionAccept,
+			content:     map[string]any{"question_0": "C"},
+			wantContent: map[string]any{"question_0": []any{"C"}},
+			wantErr:     ports.ErrChatDecisionNotOffered,
+		},
+		{
+			name:        "array and custom answer",
+			mode:        ports.ChatInputModeForm,
+			action:      ports.ChatInputActionAccept,
+			content:     map[string]any{"question_0": []any{"A", "B"}, "question_0_custom": "custom text"},
+			wantContent: map[string]any{"question_0": []any{"A", "B"}, "question_0_custom": "custom text"},
+		},
+		{
+			name:        "bare option and custom answer",
+			mode:        ports.ChatInputModeForm,
+			action:      ports.ChatInputActionAccept,
+			content:     map[string]any{"question_0": "A", "question_0_custom": "custom text"},
+			wantContent: map[string]any{"question_0": []any{"A"}, "question_0_custom": "custom text"},
+		},
+		{
+			name:        "decline",
+			mode:        ports.ChatInputModeForm,
+			action:      ports.ChatInputActionDecline,
+			content:     map[string]any{"question_0": "A", "question_0_custom": "custom text"},
+			wantContent: map[string]any{"question_0": "A", "question_0_custom": "custom text"},
+		},
+		{
+			name:        "cancel",
+			mode:        ports.ChatInputModeForm,
+			action:      ports.ChatInputActionCancel,
+			content:     map[string]any{"question_0": "A", "question_0_custom": "custom text"},
+			wantContent: map[string]any{"question_0": "A", "question_0_custom": "custom text"},
+		},
+		{
+			name:        "URL accept",
+			mode:        ports.ChatInputModeURL,
+			action:      ports.ChatInputActionAccept,
+			content:     map[string]any{"question_0": "A"},
+			wantContent: map[string]any{"question_0": "A"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			before, err := json.Marshal(tt.content)
+			if err != nil {
+				t.Fatalf("marshal original content: %v", err)
+			}
+			request := ports.ChatInputRequest{Mode: tt.mode, Schema: schema}
+			response := ports.ChatInputResponse{Action: tt.action, Content: tt.content}
+			normalized := normalizeInputResponse(request, response)
+			want := ports.ChatInputResponse{Action: tt.action, Content: tt.wantContent}
+			if !reflect.DeepEqual(normalized, want) {
+				t.Fatalf("normalized response = %#v, want %#v", normalized, want)
+			}
+			if err := validateInputResponse(request, normalized); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("validation error = %v, want %v", err, tt.wantErr)
+			}
+			after, err := json.Marshal(response.Content)
+			if err != nil {
+				t.Fatalf("marshal caller content: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("caller content changed: before = %s, after = %s", before, after)
+			}
+		})
+	}
+}
+
+func TestACPDriverParksAndResolvesMultiSelectElicitation(t *testing.T) {
+	request := acpsdk.NewUnstableCreateElicitationRequestForm(multiSelectElicitationSchema())
+	request.Form.Message = "Which scope?"
+	agent := &fakeAgent{elicitation: &request}
+	driver := New(Config{
+		Harness:      domain.HarnessClaudeCode,
+		Capabilities: ports.ChatCapabilities{ports.ChatCapabilityStreaming: true},
+		Probe:        func(context.Context) error { return nil },
+		Launch:       func(context.Context, LaunchConfig) (Launch, error) { return Launch{Command: "fake"}, nil },
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	driver.useTestProcess(fakeSpawn(agent))
+
+	conv, err := driver.Start(context.Background(), ports.ChatStartConfig{WorkspacePath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer conv.Close()
+	_ = nextEvent(t, conv.Events())
+	ref, err := conv.SendTurn(context.Background(), ports.ChatUserMessage{Text: "ask me"})
+	if err != nil {
+		t.Fatalf("SendTurn: %v", err)
+	}
+	if err := conv.(ports.ChatDeferredTurnStarter).StartDeferredTurn(ref.ProviderTurnID); err != nil {
+		t.Fatalf("StartDeferredTurn: %v", err)
+	}
+
+	var requestID string
+	for requestID == "" {
+		event := nextEvent(t, conv.Events())
+		if event.Kind == ports.ChatEventInputRequested {
+			requestID = event.RequestID
+			if event.Input == nil || event.Input.Mode != ports.ChatInputModeForm || event.Input.Message != "Which scope?" {
+				t.Fatalf("input request = %#v", event.Input)
+			}
+		}
+	}
+	if err := conv.(ports.ChatInputResponder).ResolveInput(context.Background(), requestID,
+		ports.ChatInputResponse{Action: ports.ChatInputActionAccept, Content: map[string]any{"question_0": "A"}}); err != nil {
+		t.Fatalf("ResolveInput: %v", err)
+	}
+	resolved := false
+	for {
+		event := nextEvent(t, conv.Events())
+		if event.Kind == ports.ChatEventInputResolved {
+			var detail struct {
+				Action  ports.ChatInputAction `json:"action"`
+				Content map[string]any        `json:"content"`
+			}
+			if err := json.Unmarshal(event.Detail, &detail); err != nil {
+				t.Fatalf("decode resolution detail: %v", err)
+			}
+			if event.RequestID != requestID || detail.Action != ports.ChatInputActionAccept ||
+				!reflect.DeepEqual(detail.Content["question_0"], []any{"A"}) {
+				t.Fatalf("input resolution = %#v, detail = %#v", event, detail)
+			}
+			resolved = true
+		}
+		if event.Kind == ports.ChatEventTurnCompleted {
+			break
+		}
+	}
+	if !resolved {
+		t.Fatal("input resolution event was not emitted")
+	}
+	agent.mu.Lock()
+	response := agent.elicitationResponse
+	agent.mu.Unlock()
+	if response.Accept == nil || !reflect.DeepEqual(response.Accept.Content["question_0"], []any{"A"}) {
 		t.Fatalf("elicitation response = %#v", response)
 	}
 }

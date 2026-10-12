@@ -323,6 +323,7 @@ func (c *conversation) ResolveInput(
 		c.mu.Unlock()
 		return ports.ErrChatRequestNotPending
 	}
+	response = normalizeInputResponse(request.request, response)
 	if err := validateInputResponse(request.request, response); err != nil {
 		c.mu.Unlock()
 		return err
@@ -394,6 +395,34 @@ func acpInputResponse(response ports.ChatInputResponse) acpsdk.UnstableCreateEli
 	default:
 		return acpsdk.NewUnstableCreateElicitationResponseCancel()
 	}
+}
+
+func normalizeInputResponse(request ports.ChatInputRequest, response ports.ChatInputResponse) ports.ChatInputResponse {
+	if response.Action != ports.ChatInputActionAccept || request.Mode != ports.ChatInputModeForm {
+		return response
+	}
+	properties, _ := request.Schema["properties"].(map[string]any)
+	var content map[string]any
+	for name, value := range response.Content {
+		property, _ := properties[name].(map[string]any)
+		text, ok := value.(string)
+		if property["type"] != "array" || !ok {
+			continue
+		}
+		if content == nil {
+			content = make(map[string]any, len(response.Content))
+			for key, entry := range response.Content {
+				content[key] = entry
+			}
+		}
+		// The official mobile request dock submits a multi-select question on the first tap as a bare string.
+		// Wrap that option so the provider receives the array its schema asked for.
+		content[name] = []any{text}
+	}
+	if content != nil {
+		response.Content = content
+	}
+	return response
 }
 
 func validateInputResponse(request ports.ChatInputRequest, response ports.ChatInputResponse) error {
