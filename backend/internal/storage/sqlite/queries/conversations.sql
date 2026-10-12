@@ -1617,8 +1617,10 @@ WHERE conversation_id = ?
 -- name: SelectVerifiedAuthenticationTurn :one
 -- Decode active-branch completion proofs once, then probe the existing provider
 -- turn index instead of rescanning archived JSON for every candidate turn.
-WITH completion_proofs AS MATERIALIZED (
-  SELECT e.conversation_id,
+-- DISTINCT preserves EXISTS semantics and prevents flattening without requiring
+-- the AS MATERIALIZED syntax unsupported by the pinned sqlc SQLite parser.
+WITH completion_proofs AS (
+  SELECT DISTINCT e.conversation_id,
     json_extract(e.payload_json, '$.providerTurnId') AS provider_turn_id
   FROM conversations c
   JOIN conversation_branches b ON b.id = c.active_branch_id

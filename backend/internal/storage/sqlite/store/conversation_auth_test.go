@@ -408,7 +408,7 @@ INSERT INTO conversation_provider_events VALUES(1,'conversation','branch','turn.
 					t.Fatal(err)
 				}
 			}
-			for name, q := range map[string]string{"legacy": legacyAuthenticationQuery, "materialized": query} {
+			for name, q := range map[string]string{"legacy": legacyAuthenticationQuery, "proofs": query} {
 				if got := authenticationQueryResult(t, db, q, tc.generation, tc.providerTurn, tc.cutoff); got != tc.want {
 					t.Fatalf("%s result=%q, want %q", name, got, tc.want)
 				}
@@ -440,7 +440,7 @@ func TestVerifiedAuthenticationQueryScansCompletionProofsOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			counts := make(map[string]int64)
-			for name, q := range map[string]string{"legacy": legacyAuthenticationQuery, "materialized": query} {
+			for name, q := range map[string]string{"legacy": legacyAuthenticationQuery, "proofs": query} {
 				q = strings.ReplaceAll(q, "json_extract(e.payload_json,", "json_extract(auth_query_test_probe(e.payload_json),")
 				authenticationQueryProbe.calls.Store(0)
 				if got := authenticationQueryResult(t, db, q, "", "", 0); got != fmt.Sprintf("turn-%d", size-1) {
@@ -448,7 +448,7 @@ func TestVerifiedAuthenticationQueryScansCompletionProofsOnce(t *testing.T) {
 				}
 				counts[name] = authenticationQueryProbe.calls.Load()
 			}
-			if counts["legacy"] < int64(size*size/2) || counts["materialized"] > int64(4*size) || counts["materialized"] < int64(size) {
+			if counts["legacy"] < int64(size*size/2) || counts["proofs"] > int64(4*size) || counts["proofs"] < int64(size) {
 				t.Fatalf("JSON evaluations for %d turns: %v", size, counts)
 			}
 			// Check uninstrumented planner behavior as well as deterministic work counts.
@@ -458,23 +458,23 @@ func TestVerifiedAuthenticationQueryScansCompletionProofsOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = rows.Close() }()
-			var materialized, indexedTurn bool
+			var isolatedProofs, indexedTurn bool
 			for rows.Next() {
 				var id, parent, unused int
 				var detail string
 				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
 					t.Fatal(err)
 				}
-				materialized = materialized || strings.Contains(detail, "MATERIALIZE completion_proofs")
+				isolatedProofs = isolatedProofs || strings.Contains(detail, "MATERIALIZE completion_proofs") || strings.Contains(detail, "CO-ROUTINE completion_proofs")
 				indexedTurn = indexedTurn || strings.Contains(detail, "SEARCH t USING INDEX idx_conversation_turns_provider")
 			}
 			if err := rows.Err(); err != nil {
 				t.Fatal(err)
 			}
-			if !materialized || !indexedTurn {
-				t.Fatalf("materialized=%v, indexed turn=%v", materialized, indexedTurn)
+			if !isolatedProofs || !indexedTurn {
+				t.Fatalf("isolated proofs=%v, indexed turn=%v", isolatedProofs, indexedTurn)
 			}
-			t.Logf("turns=%d legacy_json_calls=%d materialized_json_calls=%d", size, counts["legacy"], counts["materialized"])
+			t.Logf("turns=%d legacy_json_calls=%d proof_json_calls=%d", size, counts["legacy"], counts["proofs"])
 		})
 	}
 }
