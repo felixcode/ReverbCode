@@ -278,6 +278,13 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
+	// The session list is polled by every client.
+	// Terminated sessions' historical artifacts stay available on the single-session endpoint.
+	for i := range sessions {
+		if sessions[i].IsTerminated {
+			sessions[i].ArtifactFiles = nil
+		}
+	}
 	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(r, sessions)})
 }
 

@@ -1531,6 +1531,89 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	}
 }
 
+func TestSessionsAPI_ListOmitsTerminatedArtifactFilesButGetPreservesThem(t *testing.T) {
+	svc := newFakeSessionService()
+	live := svc.sessions["ao-1"]
+	live.OutputType = domain.SessionOutputArtifact
+	live.Metadata.ArtifactDir = t.TempDir()
+	live.ArtifactFiles = []domain.SessionArtifactFile{
+		{
+			Path:      "site/index.html",
+			Name:      "index.html",
+			Kind:      domain.SessionArtifactHTML,
+			Size:      42,
+			UpdatedAt: time.Now().UTC().Truncate(time.Second),
+		},
+		{
+			Path:      "notes/readme.md",
+			Name:      "readme.md",
+			Kind:      domain.SessionArtifactMarkdown,
+			Size:      12,
+			UpdatedAt: time.Now().UTC().Truncate(time.Second),
+		},
+	}
+	svc.sessions[live.ID] = live
+	terminated := live
+	terminated.ID = "ao-2"
+	terminated.IsTerminated = true
+	svc.sessions[terminated.ID] = terminated
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET sessions = %d, want 200; body=%s", status, body)
+	}
+	var list struct {
+		Sessions []struct {
+			ID            domain.SessionID                  `json:"id"`
+			ArtifactFiles []controllers.SessionArtifactView `json:"artifactFiles"`
+		} `json:"sessions"`
+	}
+	mustJSON(t, body, &list)
+	if len(list.Sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(list.Sessions))
+	}
+	listed := make(map[domain.SessionID][]controllers.SessionArtifactView)
+	for _, s := range list.Sessions {
+		listed[s.ID] = s.ArtifactFiles
+	}
+	if artifacts, ok := listed[terminated.ID]; !ok || len(artifacts) != 0 {
+		t.Fatalf("terminated artifactFiles = %+v (session present: %v), want no artifacts", artifacts, ok)
+	}
+
+	body, status, _ = doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-2", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET terminated session = %d, want 200; body=%s", status, body)
+	}
+	var detail struct {
+		Session struct {
+			ArtifactFiles []controllers.SessionArtifactView `json:"artifactFiles"`
+		} `json:"session"`
+	}
+	mustJSON(t, body, &detail)
+	for _, tc := range []struct {
+		name      string
+		artifacts []controllers.SessionArtifactView
+	}{
+		{name: "live list", artifacts: listed[live.ID]},
+		{name: "terminated detail", artifacts: detail.Session.ArtifactFiles},
+	} {
+		if len(tc.artifacts) != len(live.ArtifactFiles) {
+			t.Fatalf("%s artifactFiles = %+v, want full list", tc.name, tc.artifacts)
+		}
+		for i, artifact := range tc.artifacts {
+			want := live.ArtifactFiles[i]
+			if artifact.Path != want.Path || artifact.Name != want.Name || artifact.Kind != want.Kind ||
+				artifact.Size != want.Size || !artifact.UpdatedAt.Equal(want.UpdatedAt) || artifact.RawURL == "" {
+				t.Fatalf("%s artifactFiles[%d] = %+v, want %+v with rawUrl", tc.name, i, artifact, want)
+			}
+			if (artifact.PreviewURL != "") != (want.Kind == domain.SessionArtifactHTML) {
+				t.Fatalf("%s artifactFiles[%d] previewUrl = %q", tc.name, i, artifact.PreviewURL)
+			}
+		}
+	}
+}
+
 func TestSessionsAPI_GetExposesArtifactFilesAndServesHTMLArtifact(t *testing.T) {
 	artifactDir := t.TempDir()
 	artifactPath := filepath.Join(artifactDir, "site", "index.html")
