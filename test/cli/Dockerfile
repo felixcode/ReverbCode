@@ -14,6 +14,7 @@ WORKDIR /src
 
 # Cache modules first.
 COPY backend/go.mod backend/go.sum ./backend/
+COPY third_party/acp-go-sdk ./third_party/acp-go-sdk
 RUN cd backend && go mod download
 
 COPY backend ./backend
