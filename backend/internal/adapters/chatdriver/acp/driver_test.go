@@ -730,10 +730,12 @@ func TestPersistentACPReconnectAcknowledgesAlreadyCommittedPrompt(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("committed prompt result was not acknowledged")
 	}
+	// Activation preserves correlation; subscription admits the queued replay.
+	events := conv.Events()
 	if err := <-replayDone; err != nil {
 		t.Fatalf("write replay: %v", err)
 	}
-	ready := nextEvent(t, conv.Events())
+	ready := nextEvent(t, events)
 	if ready.Kind != ports.ChatEventControllerState || ready.ControllerState != ports.ChatControllerReady {
 		t.Fatalf("setup event = %#v", ready)
 	}
