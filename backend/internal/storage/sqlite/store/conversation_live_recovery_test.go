@@ -8,7 +8,7 @@ import (
 )
 
 func TestRecoverLiveTransportTurnRequiresExactJournalArchiveOwnership(t *testing.T) {
-	for _, scenario := range []string{"recover", "cancelled", "provider-error", "completed", "wrong-native", "wrong-generation", "no-proof", "wrong-branch", "multiple-prompts", "competing-running"} {
+	for _, scenario := range []string{"recover", "terminal-committed", "terminal-uncommitted", "cancelled", "provider-error", "completed", "wrong-native", "wrong-generation", "no-proof", "wrong-branch", "multiple-prompts", "competing-running"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, session, conversation := conversationFixture(t)
 			ctx := context.Background()
@@ -35,6 +35,15 @@ func TestRecoverLiveTransportTurnRequiresExactJournalArchiveOwnership(t *testing
 			ids := []string{"journal-1"}
 			native, generation := "native", "gen-2"
 			switch scenario {
+			case "terminal-committed":
+				ids = append(ids, "terminal-event")
+				if _, err := s.ProjectProviderEvent(ctx, conversation, session, "gen-2", "terminal-event", "turn.completed", `{"providerTurnId":"provider-turn","turnState":"completed"}`, histClock.Add(2*time.Second), func(txCtx context.Context) error {
+					return s.SettleTurn(txCtx, conversation, "provider-turn", domain.TurnStateCompleted, "", histClock.Add(2*time.Second))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			case "terminal-uncommitted":
+				ids = append(ids, "terminal-event")
 			case "cancelled":
 				if err := s.SettleTurn(ctx, conversation, "provider-turn", domain.TurnStateInterrupted, "", histClock.Add(2*time.Second)); err != nil {
 					t.Fatal(err)
@@ -74,7 +83,13 @@ func TestRecoverLiveTransportTurnRequiresExactJournalArchiveOwnership(t *testing
 				}
 			}
 			recovered, err := s.RecoverLiveTransportTurn(ctx, conversation, session, generation, native, ids, histClock.Add(3*time.Second))
-			if scenario != "recover" {
+			if scenario == "terminal-committed" {
+				if err != nil || recovered.ProviderTurnID != "" {
+					t.Fatalf("durable terminal ACK admission failed: %+v %v", recovered, err)
+				}
+				return
+			}
+			if scenario != "recover" && scenario != "terminal-uncommitted" {
 				if err == nil {
 					t.Fatalf("unsafe recovery accepted: %+v", recovered)
 				}

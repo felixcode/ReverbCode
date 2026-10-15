@@ -114,3 +114,38 @@ func TestReconnectReplayUnsubscribedCloseReleasesReader(t *testing.T) {
 		})
 	}
 }
+
+func TestReconnectRecoveryPendingTerminalKeepsOriginalTurn(t *testing.T) {
+	conv, host := reconnectReplayFixture(t)
+	conv.liveState.ActivePrompt = false
+	conv.liveState.PendingResultEventID = "terminal-event"
+	conv.proc.recoveryEvidence = func(context.Context, int64) ([]string, error) {
+		return []string{"journal-event", "terminal-event"}, nil
+	}
+	ids, err := conv.ReadLiveTurnRecoveryEvidence(context.Background())
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("pending result evidence=%v err=%v", ids, err)
+	}
+	if err := conv.ActivateLiveReconnect(context.Background(), "recovered-turn"); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_, _ = fmt.Fprintln(host, `{"jsonrpc":"2.0","method":"_ao/persistent_prompt_result","params":{"eventId":"terminal-event","result":{"stopReason":"end_turn"}}}`)
+	}()
+	events := conv.Events()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case event := <-events:
+			if event.Kind == ports.ChatEventTurnCompleted {
+				if event.ProviderTurnID != "recovered-turn" || event.ProviderEventID != "terminal-event" {
+					t.Fatalf("completion association=%+v", event)
+				}
+				return
+			}
+		case <-deadline.C:
+			t.Fatal("pending completion was not replayed")
+		}
+	}
+}

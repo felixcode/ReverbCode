@@ -1720,6 +1720,7 @@ CROSS JOIN conversation_provider_events e
  AND e.provider_event_id <> ''
  AND e.provider_event_id IN (CAST(replay.value AS TEXT), CAST(replay.value AS TEXT) || ':0')
 WHERE e.branch_id = sqlc.arg(branch_id)
+  AND (COALESCE(json_extract(e.payload_json, '$.providerConversationId'), '') = '' OR json_extract(e.payload_json, '$.providerConversationId') = sqlc.arg(native_id))
   AND COALESCE(json_extract(e.payload_json, '$.providerTurnId'), '') <> '';
 
 -- name: RestoreTransportFailedConversationTurn :execrows
@@ -1730,3 +1731,16 @@ WHERE id = sqlc.arg(turn_id) AND conversation_id = sqlc.arg(conversation_id)
   AND branch_id = sqlc.arg(branch_id)
   AND state = 'failed' AND rolled_back_at IS NULL
   AND error_message = 'controller ended before the turn completed';
+
+-- name: HasLiveRecoveryCommittedCompletion :one
+SELECT EXISTS (
+ SELECT 1 FROM json_each(sqlc.arg(event_ids)) AS replay
+ CROSS JOIN conversation_provider_events e
+   ON e.conversation_id = sqlc.arg(conversation_id)
+  AND e.provider_event_id <> '' AND e.provider_event_id = CAST(replay.value AS TEXT)
+ WHERE e.branch_id = sqlc.arg(branch_id) AND e.method = 'turn.completed'
+   AND json_extract(e.payload_json, '$.providerTurnId') = sqlc.arg(provider_turn_id)
+   AND json_extract(e.payload_json, '$.turnState') = 'completed'
+   AND json_extract(e.payload_json, '$.error') IS NULL
+   AND (COALESCE(json_extract(e.payload_json, '$.providerConversationId'), '') = '' OR json_extract(e.payload_json, '$.providerConversationId') = sqlc.arg(native_id))
+);

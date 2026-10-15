@@ -51,7 +51,7 @@ func readACPRecoveryEvidence(ctx context.Context, dataDir string, expected Descr
 	if err != nil {
 		return nil, err
 	}
-	if !os.SameFile(before, info) || info.Size() == 0 || info.Size() > budget || info.Size() > maxACPJournalBytes {
+	if !os.SameFile(before, info) || info.Size() > budget || info.Size() > maxACPJournalBytes {
 		return nil, errors.New("recovery journal identity or budget invalid")
 	}
 	reader := bufio.NewReader(io.NewSectionReader(file, 0, info.Size()))
@@ -96,7 +96,7 @@ func readACPRecoveryEvidence(ctx context.Context, dataDir string, expected Descr
 			seen[id] = true
 		}
 	}
-	if !nativeObserved || len(ids) == 0 {
+	if info.Size() > 0 && (!nativeObserved || len(ids) == 0) {
 		return nil, errors.New("recovery journal has no native event evidence")
 	}
 	if err := checkHost(); err != nil {

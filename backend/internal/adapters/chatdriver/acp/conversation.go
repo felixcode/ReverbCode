@@ -400,7 +400,7 @@ func (c *conversation) ActivateLiveReconnect(ctx context.Context, providerTurnID
 // its original prompt. The journal reader verifies the attached host and native
 // identity; it never consumes frames from the gated SDK connection.
 func (c *conversation) ReadLiveTurnRecoveryEvidence(ctx context.Context) ([]string, error) {
-	if c.proc.reconnected && c.liveState != nil && !c.liveState.ActivePrompt {
+	if c.proc.reconnected && c.liveState != nil && !c.liveState.ActivePrompt && c.liveState.PendingResultEventID == "" {
 		return nil, nil
 	}
 	if !c.proc.reconnected || c.liveState == nil || c.proc.recoveryEvidence == nil {

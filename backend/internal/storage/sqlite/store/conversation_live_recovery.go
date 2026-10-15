@@ -49,7 +49,7 @@ func (s *Store) RecoverLiveTransportTurn(ctx context.Context, conversationID str
 		if branch.ProviderConversationID != nativeID {
 			return errors.New("live turn recovery native branch mismatch")
 		}
-		candidates, err := q.SelectLiveRecoveryProviderTurns(ctx, gen.SelectLiveRecoveryProviderTurnsParams{EventIds: string(encoded), ConversationID: conversationID, BranchID: conv.ActiveBranchID})
+		candidates, err := q.SelectLiveRecoveryProviderTurns(ctx, gen.SelectLiveRecoveryProviderTurnsParams{EventIds: string(encoded), ConversationID: conversationID, BranchID: conv.ActiveBranchID, NativeID: nativeID})
 		if err != nil {
 			return err
 		}
@@ -71,6 +71,15 @@ func (s *Store) RecoverLiveTransportTurn(ctx context.Context, conversationID str
 			if other.ID != turn.ID && other.BranchID == conv.ActiveBranchID && other.State == domain.TurnStateRunning && !other.RolledBackAt.Valid {
 				return errors.New("live turn recovery has competing running work")
 			}
+		}
+		if turn.State == domain.TurnStateCompleted {
+			committed, err := q.HasLiveRecoveryCommittedCompletion(ctx, gen.HasLiveRecoveryCommittedCompletionParams{EventIds: string(encoded), ConversationID: conversationID, BranchID: conv.ActiveBranchID, ProviderTurnID: turn.ProviderTurnID, NativeID: nativeID})
+			if err != nil {
+				return err
+			}
+			if committed {
+				return nil
+			} // Original activator may ACK this proven durable terminal.
 		}
 		if turn.State == domain.TurnStateRunning && turn.ControllerGeneration == generation {
 			restored = turnToDomain(turn)

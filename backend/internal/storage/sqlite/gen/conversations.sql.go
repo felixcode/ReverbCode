@@ -811,6 +811,41 @@ func (q *Queries) HasConversationTurns(ctx context.Context, conversationID strin
 	return exists, err
 }
 
+const hasLiveRecoveryCommittedCompletion = `-- name: HasLiveRecoveryCommittedCompletion :one
+SELECT EXISTS (
+ SELECT 1 FROM json_each(?1) AS replay
+ CROSS JOIN conversation_provider_events e
+   ON e.conversation_id = ?2
+  AND e.provider_event_id <> '' AND e.provider_event_id = CAST(replay.value AS TEXT)
+ WHERE e.branch_id = ?3 AND e.method = 'turn.completed'
+   AND json_extract(e.payload_json, '$.providerTurnId') = ?4
+   AND json_extract(e.payload_json, '$.turnState') = 'completed'
+   AND json_extract(e.payload_json, '$.error') IS NULL
+   AND (COALESCE(json_extract(e.payload_json, '$.providerConversationId'), '') = '' OR json_extract(e.payload_json, '$.providerConversationId') = ?5)
+)
+`
+
+type HasLiveRecoveryCommittedCompletionParams struct {
+	EventIds       interface{}
+	ConversationID string
+	BranchID       string
+	ProviderTurnID string
+	NativeID       string
+}
+
+func (q *Queries) HasLiveRecoveryCommittedCompletion(ctx context.Context, arg HasLiveRecoveryCommittedCompletionParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasLiveRecoveryCommittedCompletion,
+		arg.EventIds,
+		arg.ConversationID,
+		arg.BranchID,
+		arg.ProviderTurnID,
+		arg.NativeID,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const hasPendingConversationInteractions = `-- name: HasPendingConversationInteractions :one
 SELECT EXISTS (
     SELECT 1
@@ -3393,6 +3428,7 @@ CROSS JOIN conversation_provider_events e
  AND e.provider_event_id <> ''
  AND e.provider_event_id IN (CAST(replay.value AS TEXT), CAST(replay.value AS TEXT) || ':0')
 WHERE e.branch_id = ?3
+  AND (COALESCE(json_extract(e.payload_json, '$.providerConversationId'), '') = '' OR json_extract(e.payload_json, '$.providerConversationId') = ?4)
   AND COALESCE(json_extract(e.payload_json, '$.providerTurnId'), '') <> ''
 `
 
@@ -3400,12 +3436,18 @@ type SelectLiveRecoveryProviderTurnsParams struct {
 	EventIds       interface{}
 	ConversationID string
 	BranchID       string
+	NativeID       string
 }
 
 // Probe exact archived event identities before decoding payloads. Empty turn
 // correlation on control events is not evidence for a different prompt.
 func (q *Queries) SelectLiveRecoveryProviderTurns(ctx context.Context, arg SelectLiveRecoveryProviderTurnsParams) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, selectLiveRecoveryProviderTurns, arg.EventIds, arg.ConversationID, arg.BranchID)
+	rows, err := q.db.QueryContext(ctx, selectLiveRecoveryProviderTurns,
+		arg.EventIds,
+		arg.ConversationID,
+		arg.BranchID,
+		arg.NativeID,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -474,9 +474,13 @@ func attach(ctx context.Context, d Descriptor, reconnected bool, dataDirs ...str
 		}
 	}
 	var recoveryEvidence func(context.Context, int64) ([]string, error)
-	if reconnected && response.ACPState != nil && response.ACPState.ActivePrompt && len(dataDirs) > 0 {
+	if reconnected && response.ACPState != nil && (response.ACPState.ActivePrompt || response.ACPState.PendingResultEventID != "") && len(dataDirs) > 0 {
 		recoveryEvidence = func(ctx context.Context, budget int64) ([]string, error) {
-			return readACPRecoveryEvidence(ctx, dataDirs[0], d, response.ACPState.SessionID, budget)
+			ids, err := readACPRecoveryEvidence(ctx, dataDirs[0], d, response.ACPState.SessionID, budget)
+			if err == nil && response.ACPState.PendingResultEventID != "" {
+				ids = append(ids, response.ACPState.PendingResultEventID)
+			}
+			return ids, err
 		}
 	}
 	return &Transport{
