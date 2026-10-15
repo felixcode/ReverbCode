@@ -1190,3 +1190,11 @@ Agent Orchestrator's architecture is designed around:
 - **Safety:** Termination is conservative, paths are validated, and hooks are gitignored.
 
 This architecture enables parallel AI agents to work safely while maintaining complete visibility and control.
+
+A live reconnect corrects an exited session projection only when the same active
+branch still has a running turn with a durable `turn.transport_recovered` audit.
+Lifecycle performs a narrow revision and controller-generation CAS in the same
+SQLite transaction as that proof. Newer activity, pending input/approval, terminal
+turns, and newer thread state remain authoritative; an old idle thread with no
+waiting flags becomes active together with the recovered session. Ordinary
+reconnects preserve activity and recency.

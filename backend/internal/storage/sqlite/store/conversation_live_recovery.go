@@ -114,3 +114,50 @@ func (s *Store) RecoverLiveTransportTurn(ctx context.Context, conversationID str
 	})
 	return restored, err
 }
+
+// RestoreRecoveredChatActivity is the lifecycle reconnect correction for a
+// transport-failed turn already restored from exact journal/archive evidence.
+// Proof, pending interactions, terminal state and revision CAS share one write
+// transaction, so a newer input/terminal/owner can never be painted working.
+func (s *Store) RestoreRecoveredChatActivity(ctx context.Context, rec domain.SessionRecord, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	applied := false
+	err := s.inTx(ctx, "restore recovered Chat activity", func(q *gen.Queries) error {
+		proofs, err := q.SelectLiveTransportRecoveryProjection(ctx, gen.SelectLiveTransportRecoveryProjectionParams{SessionID: &rec.ID, NativeID: rec.Metadata.ProviderConversationID})
+		if err != nil {
+			return err
+		}
+		if len(proofs) != 1 {
+			return nil
+		}
+		proof := proofs[0]
+		var thread domain.ConversationThreadState
+		if proof.ThreadStateJson.Valid {
+			if err := json.Unmarshal([]byte(proof.ThreadStateJson.String), &thread); err != nil {
+				return err
+			}
+			// A newer provider lifecycle fact, including a terminal idle, is
+			// authoritative even if a stale session exit still needs correction.
+			if thread.UpdatedAt.After(proof.ReceivedAt) || len(thread.WaitingOn) > 0 || thread.ArchivedAt != nil || thread.ClosedAt != nil {
+				return nil
+			}
+		}
+		rows, err := q.RestoreRecoveredChatActivity(ctx, gen.RestoreRecoveredChatActivityParams{Now: now, SessionID: rec.ID, ExpectedRevision: rec.Revision, Generation: rec.Metadata.ControllerGeneration, NativeID: rec.Metadata.ProviderConversationID, RecoveredAt: proof.ReceivedAt})
+		if err != nil || rows != 1 {
+			return err
+		}
+		applied = true
+		if thread.Status == domain.ThreadStatusIdle {
+			thread.Status = domain.ThreadStatusActive
+			thread.UpdatedAt = now
+			encoded, err := json.Marshal(thread)
+			if err != nil {
+				return err
+			}
+			return q.UpdateConversationThreadState(ctx, gen.UpdateConversationThreadStateParams{ID: proof.ConversationID, ThreadStateJson: sql.NullString{String: string(encoded), Valid: true}})
+		}
+		return nil
+	})
+	return applied && err == nil, err
+}

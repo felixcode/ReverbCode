@@ -1509,8 +1509,17 @@ func (m *Manager) MarkChatReconnected(ctx context.Context, id domain.SessionID, 
 		metadata.ControllerGeneration == "" || metadata.ControllerGeneration != rec.Metadata.ControllerGeneration {
 		return fmt.Errorf("lifecycle: live Chat reconnect for %q no longer owns the session", id)
 	}
-	// There are no new lifecycle facts to persist. In particular, avoid a full
-	// record write that could overwrite activity arriving during reconnection.
+	// Only a journal-proven transport-cleanup repair can correct a stale exit.
+	// The store atomically rechecks its durable proof and revision/owner fences;
+	// ordinary reconnects and newer activity remain untouched.
+	if rec.Activity.State == domain.ActivityExited {
+		if recovery, ok := m.store.(interface {
+			RestoreRecoveredChatActivity(context.Context, domain.SessionRecord, time.Time) (bool, error)
+		}); ok {
+			_, err = recovery.RestoreRecoveredChatActivity(ctx, rec, m.clock())
+			return err
+		}
+	}
 	return nil
 }
 

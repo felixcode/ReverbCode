@@ -1763,6 +1763,45 @@ func (q *Queries) ResolveConversationApproval(ctx context.Context, arg ResolveCo
 	return err
 }
 
+const restoreRecoveredChatActivity = `-- name: RestoreRecoveredChatActivity :execrows
+UPDATE sessions SET activity_state = 'active', activity_last_at = ?1,
+                    updated_at = ?1
+WHERE sessions.id = ?2 AND sessions.revision = ?3
+  AND controller_generation = ?4
+  AND provider_conversation_id = ?5
+  AND session_mode = 'chat' AND is_terminated = 0
+  AND activity_state = 'exited' AND activity_last_at <= ?6
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_switches s WHERE s.session_id = sessions.id
+      AND s.from_harness = sessions.harness
+      AND s.state IN ('stopping_source', 'source_stopped', 'starting_target')
+  )
+`
+
+type RestoreRecoveredChatActivityParams struct {
+	Now              time.Time
+	SessionID        domain.SessionID
+	ExpectedRevision int64
+	Generation       string
+	NativeID         string
+	RecoveredAt      time.Time
+}
+
+func (q *Queries) RestoreRecoveredChatActivity(ctx context.Context, arg RestoreRecoveredChatActivityParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, restoreRecoveredChatActivity,
+		arg.Now,
+		arg.SessionID,
+		arg.ExpectedRevision,
+		arg.Generation,
+		arg.NativeID,
+		arg.RecoveredAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const restoreTransportFailedConversationTurn = `-- name: RestoreTransportFailedConversationTurn :execrows
 UPDATE conversation_turns
 SET state = 'running', error_message = '', completed_at = NULL,
@@ -3459,6 +3498,68 @@ func (q *Queries) SelectLiveRecoveryProviderTurns(ctx context.Context, arg Selec
 			return nil, err
 		}
 		items = append(items, provider_turn_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const selectLiveTransportRecoveryProjection = `-- name: SelectLiveTransportRecoveryProjection :many
+SELECT c.id AS conversation_id, e.received_at, c.thread_state_json
+FROM conversations c
+JOIN conversation_branches b ON b.id = c.active_branch_id
+JOIN conversation_turns t ON t.conversation_id = c.id AND t.branch_id = b.id
+JOIN conversation_provider_events e
+  ON e.conversation_id = c.id
+ AND e.provider_event_id >= 'live-turn-recovery:' || t.id || ':'
+ AND e.provider_event_id < 'live-turn-recovery:' || t.id || ';'
+WHERE c.current_session_id = ?1
+  AND c.current_review_id IS NULL
+  AND b.provider_conversation_id = ?2
+  AND t.handled_by_session_id = ?1
+  AND t.handled_by_review_id IS NULL
+  AND t.state = 'running' AND t.rolled_back_at IS NULL
+  AND t.promoted_to_turn_id IS NULL
+  AND e.provider_event_id <> ''
+  AND e.method = 'turn.transport_recovered'
+  AND e.branch_id = c.active_branch_id
+  AND json_extract(e.payload_json, '$.providerTurnId') = t.provider_turn_id
+  AND NOT EXISTS (
+      SELECT 1 FROM conversation_activities a
+      WHERE a.conversation_id = c.id AND a.kind IN ('approval', 'user_input')
+        AND a.status = 'pending'
+  )
+`
+
+type SelectLiveTransportRecoveryProjectionParams struct {
+	SessionID *domain.SessionID
+	NativeID  string
+}
+
+type SelectLiveTransportRecoveryProjectionRow struct {
+	ConversationID  string
+	ReceivedAt      time.Time
+	ThreadStateJson sql.NullString
+}
+
+// The audit lookup is an indexed exact-turn ID range, not an archive JSON scan.
+func (q *Queries) SelectLiveTransportRecoveryProjection(ctx context.Context, arg SelectLiveTransportRecoveryProjectionParams) ([]SelectLiveTransportRecoveryProjectionRow, error) {
+	rows, err := q.db.QueryContext(ctx, selectLiveTransportRecoveryProjection, arg.SessionID, arg.NativeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SelectLiveTransportRecoveryProjectionRow{}
+	for rows.Next() {
+		var i SelectLiveTransportRecoveryProjectionRow
+		if err := rows.Scan(&i.ConversationID, &i.ReceivedAt, &i.ThreadStateJson); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

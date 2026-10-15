@@ -1744,3 +1744,44 @@ SELECT EXISTS (
    AND json_extract(e.payload_json, '$.error') IS NULL
    AND (COALESCE(json_extract(e.payload_json, '$.providerConversationId'), '') = '' OR json_extract(e.payload_json, '$.providerConversationId') = sqlc.arg(native_id))
 );
+
+-- name: SelectLiveTransportRecoveryProjection :many
+-- The audit lookup is an indexed exact-turn ID range, not an archive JSON scan.
+SELECT c.id AS conversation_id, e.received_at, c.thread_state_json
+FROM conversations c
+JOIN conversation_branches b ON b.id = c.active_branch_id
+JOIN conversation_turns t ON t.conversation_id = c.id AND t.branch_id = b.id
+JOIN conversation_provider_events e
+  ON e.conversation_id = c.id
+ AND e.provider_event_id >= 'live-turn-recovery:' || t.id || ':'
+ AND e.provider_event_id < 'live-turn-recovery:' || t.id || ';'
+WHERE c.current_session_id = sqlc.arg(session_id)
+  AND c.current_review_id IS NULL
+  AND b.provider_conversation_id = sqlc.arg(native_id)
+  AND t.handled_by_session_id = sqlc.arg(session_id)
+  AND t.handled_by_review_id IS NULL
+  AND t.state = 'running' AND t.rolled_back_at IS NULL
+  AND t.promoted_to_turn_id IS NULL
+  AND e.provider_event_id <> ''
+  AND e.method = 'turn.transport_recovered'
+  AND e.branch_id = c.active_branch_id
+  AND json_extract(e.payload_json, '$.providerTurnId') = t.provider_turn_id
+  AND NOT EXISTS (
+      SELECT 1 FROM conversation_activities a
+      WHERE a.conversation_id = c.id AND a.kind IN ('approval', 'user_input')
+        AND a.status = 'pending'
+  );
+
+-- name: RestoreRecoveredChatActivity :execrows
+UPDATE sessions SET activity_state = 'active', activity_last_at = sqlc.arg(now),
+                    updated_at = sqlc.arg(now)
+WHERE sessions.id = sqlc.arg(session_id) AND sessions.revision = sqlc.arg(expected_revision)
+  AND controller_generation = sqlc.arg(generation)
+  AND provider_conversation_id = sqlc.arg(native_id)
+  AND session_mode = 'chat' AND is_terminated = 0
+  AND activity_state = 'exited' AND activity_last_at <= sqlc.arg(recovered_at)
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_switches s WHERE s.session_id = sessions.id
+      AND s.from_harness = sessions.harness
+      AND s.state IN ('stopping_source', 'source_stopped', 'starting_target')
+  );
