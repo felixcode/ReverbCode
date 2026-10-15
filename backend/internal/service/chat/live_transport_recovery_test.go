@@ -42,6 +42,14 @@ func TestServiceLiveTransportRecoveryDoesNotRepeatPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Publish the native binding normally supplied by ControllerReady in production.
+	initial, err := st.LoadConversationSnapshot(ctx, firstController.ConversationID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAndActivateConversationBranch(ctx, testSession, domain.ConversationBranch{ID: "published-native-branch", ConversationID: firstController.ConversationID(), SessionID: testSession, ProviderConversationID: firstProvider.ProviderConversationID(), ParentBranchID: initial.Conversation.ActiveBranchID, CreatedAt: time.Now().UTC()}, firstController.Generation(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	turn, err := firstController.Send(ctx, ports.ChatUserMessage{Text: "synthetic ongoing prompt"})
 	if err != nil {
 		t.Fatal(err)
