@@ -1728,6 +1728,47 @@ func (q *Queries) ResolveConversationApproval(ctx context.Context, arg ResolveCo
 	return err
 }
 
+const selectAuthenticationTurnCandidate = `-- name: SelectAuthenticationTurnCandidate :one
+SELECT 1 FROM conversation_turns t
+JOIN conversations c ON c.id = t.conversation_id
+WHERE t.conversation_id = ?1
+  AND t.controller_generation = COALESCE(
+    (SELECT controller_generation FROM review WHERE id = c.current_review_id),
+    (SELECT controller_generation FROM sessions WHERE id = c.current_session_id))
+  AND (?2 = '' OR t.controller_generation = ?2)
+  AND t.branch_id = c.active_branch_id
+  AND t.state = 'completed' AND t.rolled_back_at IS NULL
+  AND t.provider_turn_id <> ''
+  AND (?3 = '' OR t.provider_turn_id = ?3)
+  AND t.started_at > ?4
+  AND t.completed_at > ?4
+LIMIT 1
+`
+
+type SelectAuthenticationTurnCandidateParams struct {
+	ConversationID string
+	Generation     interface{}
+	ProviderTurnID interface{}
+	AfterAt        sql.NullTime
+}
+
+// A completed turn proves usable authentication only for the current controller
+// and active provider branch, after the last rejection/account change.
+// An eligible turn is necessary, never sufficient, evidence for authentication.
+// Check before materializing completion proofs; queued/running or old-generation
+// turns must not force a reconnect to decode the entire branch journal.
+func (q *Queries) SelectAuthenticationTurnCandidate(ctx context.Context, arg SelectAuthenticationTurnCandidateParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, selectAuthenticationTurnCandidate,
+		arg.ConversationID,
+		arg.Generation,
+		arg.ProviderTurnID,
+		arg.AfterAt,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const selectCompletedEditReplacement = `-- name: SelectCompletedEditReplacement :one
 SELECT t.id, t.conversation_id, t.handled_by_session_id, t.provider_turn_id, t.controller_generation, t.state, t.error_message, t.requested_at, t.started_at, t.completed_at, t.diff_json, t.rolled_back_at, t.plan_json, t.branch_id, t.promotion_started_at, t.promoted_to_turn_id, t.retry_of_turn_id, t.handled_by_review_id, b.parent_branch_id
 FROM conversation_messages m
@@ -3700,8 +3741,6 @@ type SelectVerifiedAuthenticationTurnParams struct {
 	AfterAt        sql.NullTime
 }
 
-// A completed turn proves usable authentication only for the current controller
-// and active provider branch, after the last rejection/account change.
 // Decode active-branch completion proofs once, then probe the existing provider
 // turn index instead of rescanning archived JSON for every candidate turn.
 // DISTINCT preserves EXISTS semantics and prevents flattening without requiring

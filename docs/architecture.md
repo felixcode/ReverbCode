@@ -11,7 +11,11 @@ without an agent terminal runtime. Codex and all ACP Chat processes run in
 detached per-session hosts, so replacing the daemon or desktop app does not
 stop an in-flight turn. The ACP host also preserves connection setup, JSON-RPC
 correlation, pending interactions, and acknowledged prompt replay while the
-replacement daemon rebuilds its typed controller.
+replacement daemon rebuilds its typed controller. Reconnected ACP journal reads remain paused until
+both durable turn activation and controller event subscription have completed.
+Authentication reconciliation first checks for an eligible current completed turn;
+only a candidate triggers archived completion-proof decoding. This precheck does
+not replace the authoritative proof or infer authentication from a live process.
 
 A durable handoff can move a compatible native conversation between TUI and
 Chat, but both controllers are never live at once. The daemon coordinates both

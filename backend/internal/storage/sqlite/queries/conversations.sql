@@ -1629,6 +1629,25 @@ WHERE conversation_id = ?
 
 -- A completed turn proves usable authentication only for the current controller
 -- and active provider branch, after the last rejection/account change.
+-- name: SelectAuthenticationTurnCandidate :one
+-- An eligible turn is necessary, never sufficient, evidence for authentication.
+-- Check before materializing completion proofs; queued/running or old-generation
+-- turns must not force a reconnect to decode the entire branch journal.
+SELECT 1 FROM conversation_turns t
+JOIN conversations c ON c.id = t.conversation_id
+WHERE t.conversation_id = sqlc.arg(conversation_id)
+  AND t.controller_generation = COALESCE(
+    (SELECT controller_generation FROM review WHERE id = c.current_review_id),
+    (SELECT controller_generation FROM sessions WHERE id = c.current_session_id))
+  AND (sqlc.arg(generation) = '' OR t.controller_generation = sqlc.arg(generation))
+  AND t.branch_id = c.active_branch_id
+  AND t.state = 'completed' AND t.rolled_back_at IS NULL
+  AND t.provider_turn_id <> ''
+  AND (sqlc.arg(provider_turn_id) = '' OR t.provider_turn_id = sqlc.arg(provider_turn_id))
+  AND t.started_at > sqlc.arg(after_at)
+  AND t.completed_at > sqlc.arg(after_at)
+LIMIT 1;
+
 -- name: SelectVerifiedAuthenticationTurn :one
 -- Decode active-branch completion proofs once, then probe the existing provider
 -- turn index instead of rescanning archived JSON for every candidate turn.

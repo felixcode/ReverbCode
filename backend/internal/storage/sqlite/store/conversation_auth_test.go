@@ -560,3 +560,77 @@ func TestVerifiedAuthenticationProviderTurnQueryBoundsCompletionProofWork(t *tes
 		})
 	}
 }
+
+func TestAuthenticationReconciliationEmptyEpochPreservesDemand(t *testing.T) {
+	s, session, conversation := conversationFixture(t)
+	ctx := context.Background()
+	failureAt := histClock.Add(time.Second)
+	want := domain.ConversationAccount{AuthenticationState: "required", ReauthRequiredAt: &failureAt, AuthFailureID: "still-required", ReauthReason: "expired"}
+	if err := s.RecordAccount(ctx, conversation, want, failureAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdoptProviderTurn(ctx, conversation, session, "gen-1", "turn", "running-provider", failureAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReconcileConversationAuthentication(ctx, conversation, "", "", failureAt.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.AuthenticationState != "required" || got.AuthFailureID != want.AuthFailureID || got.ReauthRequiredAt == nil || !got.ReauthRequiredAt.Equal(failureAt) || got.AuthVerifiedAt != nil {
+		t.Fatalf("empty epoch changed authentication: %+v", got)
+	}
+}
+
+func TestAuthenticationTurnCandidateAvoidsEmptyEpochProofDecode(t *testing.T) {
+	for _, mutation := range []string{
+		`UPDATE conversation_turns SET state='running'`,
+		`UPDATE conversation_turns SET state='queued'`,
+		`UPDATE conversation_turns SET controller_generation='old-generation'`,
+		`UPDATE conversation_turns SET completed_at=0`,
+		`UPDATE conversation_turns SET rolled_back_at=4`,
+	} {
+		t.Run(mutation, func(t *testing.T) {
+			db, proofs, _ := authenticationQueryFixture(t)
+			_, err := db.Exec(`INSERT INTO conversation_turns(id,conversation_id,controller_generation,branch_id,state,provider_turn_id,started_at,completed_at) VALUES('turn','conversation','generation','branch','completed','provider-turn',2,3)`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 256; i++ {
+				if _, err := db.Exec(`INSERT INTO conversation_provider_events(conversation_id,branch_id,method,payload_json) VALUES('conversation','branch','turn.completed','{"providerTurnId":"provider-turn","turnState":"completed"}')`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.Exec(mutation); err != nil {
+				t.Fatal(err)
+			}
+			source, err := os.ReadFile("../queries/conversations.sql")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, candidate, ok := strings.Cut(string(source), "-- name: SelectAuthenticationTurnCandidate :one\n")
+			if !ok {
+				t.Fatal("missing candidate query")
+			}
+			candidate, _, _ = strings.Cut(candidate, "-- name:")
+			for _, arg := range []string{"conversation_id", "generation", "provider_turn_id", "after_at"} {
+				candidate = strings.ReplaceAll(candidate, "sqlc.arg("+arg+")", ":"+arg)
+			}
+			args := []any{sql.Named("conversation_id", "conversation"), sql.Named("generation", ""), sql.Named("provider_turn_id", ""), sql.Named("after_at", 0)}
+			var marker int
+			if err := db.QueryRow(candidate, args...).Scan(&marker); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("candidate=%d err=%v", marker, err)
+			}
+			// Old proof materialization decodes archived JSON despite an empty epoch.
+			authenticationQueryProbe.calls.Store(0)
+			instrumented := strings.ReplaceAll(proofs, "json_extract(e.payload_json,", "json_extract(auth_query_test_probe(e.payload_json),")
+			if got := authenticationQueryResult(t, db, instrumented, "", "", 0); got != "" {
+				t.Fatalf("unexpected proof %q", got)
+			}
+			if calls := authenticationQueryProbe.calls.Load(); calls == 0 {
+				t.Fatal("fixture did not exercise expensive legacy proof work")
+			} else {
+				t.Logf("empty epoch old proof JSON calls=%d; candidate JSON calls=0", calls)
+			}
+		})
+	}
+}

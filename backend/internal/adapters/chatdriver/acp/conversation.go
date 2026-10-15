@@ -125,6 +125,8 @@ type conversation struct {
 	detaching          bool
 	terminalEventID    string
 	ignorePromptResult bool
+	replayActivated    bool
+	eventsSubscribed   bool
 	// onAuthRejected corrects cached auth state when the provider rejects the
 	// credential mid-turn. Nil when the binding does not supply one.
 	onAuthRejected        func()
@@ -327,7 +329,15 @@ func (c *conversation) Capabilities() ports.ChatCapabilities {
 	return cloneCapabilities(c.capabilities)
 }
 
-func (c *conversation) Events() <-chan ports.ChatEvent { return c.events }
+func (c *conversation) Events() <-chan ports.ChatEvent {
+	c.mu.Lock()
+	c.eventsSubscribed = true
+	if c.replayActivated && c.proc.gate != nil {
+		c.proc.gate.Open()
+	}
+	c.mu.Unlock()
+	return c.events
+}
 
 // PreservesProviderOnClose reports that Close detaches only when this
 // conversation is backed by the daemon-independent host.
@@ -378,8 +388,11 @@ func (c *conversation) ActivateLiveReconnect(ctx context.Context, providerTurnID
 		c.nestedMessages = make(map[string]nestedMessageState)
 		c.tools = make(map[string]*toolState)
 	}
+	c.replayActivated = true
+	if c.eventsSubscribed {
+		c.proc.gate.Open()
+	}
 	c.mu.Unlock()
-	c.proc.gate.Open()
 	return nil
 }
 

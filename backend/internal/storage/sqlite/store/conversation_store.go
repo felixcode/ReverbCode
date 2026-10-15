@@ -1849,6 +1849,18 @@ func (s *Store) ReconcileConversationAuthentication(ctx context.Context, convers
 			AfterAt: sql.NullTime{Time: cutoff, Valid: true},
 		})
 	} else {
+		// A current completed turn is necessary but not sufficient proof. In an
+		// empty/currently-running epoch, avoid decoding old branch completions.
+		_, err = q.SelectAuthenticationTurnCandidate(ctx, gen.SelectAuthenticationTurnCandidateParams{
+			ConversationID: conversationID, Generation: generation, ProviderTurnID: providerTurnID,
+			AfterAt: sql.NullTime{Time: cutoff, Valid: true},
+		})
+		if errors.Is(err, sql.ErrNoRows) {
+			return account, nil
+		}
+		if err != nil {
+			return nil, err
+		}
 		turn, err = q.SelectVerifiedAuthenticationTurn(ctx, gen.SelectVerifiedAuthenticationTurnParams{
 			ConversationID: conversationID, Generation: generation, ProviderTurnID: providerTurnID,
 			AfterAt: sql.NullTime{Time: cutoff, Valid: true},
