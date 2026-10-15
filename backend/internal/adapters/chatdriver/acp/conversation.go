@@ -204,8 +204,8 @@ func newConversation(
 	}
 	legacyWire, sdkWriter, sdkReader := newLegacyACPTransport(proc.stdin, proc.stdout)
 	c.legacyWire = legacyWire
-	c.conn = acpsdk.NewClientSideConnection(
-		c, sdkWriter, newExtensionMethodReader(sdkReader, extensionAliases),
+	c.conn = acpsdk.NewClientSideConnectionWithOptions(
+		c, sdkWriter, newExtensionMethodReader(sdkReader, extensionAliases), notificationQueueOptions(),
 	)
 	c.conn.SetLogger(log)
 	go c.watchConnection()

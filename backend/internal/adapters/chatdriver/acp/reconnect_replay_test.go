@@ -36,6 +36,15 @@ func reconnectReplayFixture(t *testing.T) (*conversation, net.Conn) {
 }
 
 func TestReconnectReplayWaitsForConsumer(t *testing.T) {
+	runReconnectReplay(t, 0)
+}
+
+func TestReconnectReplaySlowConsumer(t *testing.T) {
+	runReconnectReplay(t, 100*time.Microsecond)
+}
+
+func runReconnectReplay(t *testing.T, consumerDelay time.Duration) {
+	t.Helper()
 	conv, host := reconnectReplayFixture(t)
 	const frames = eventBuffer + 2048
 	sent := make(chan error, 1)
@@ -61,7 +70,7 @@ func TestReconnectReplayWaitsForConsumer(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 	events := conv.Events()
-	deadline := time.NewTimer(10 * time.Second)
+	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
 	for i := 0; i < frames; {
 		select {
@@ -71,6 +80,9 @@ func TestReconnectReplayWaitsForConsumer(t *testing.T) {
 			}
 			if event.Delta != fmt.Sprint(i) || event.ProviderTurnID != "durable-turn" || event.ProviderEventID != fmt.Sprintf("frame-%d:0", i) {
 				t.Fatalf("out of order frame %d: %+v", i, event)
+			}
+			if consumerDelay > 0 {
+				time.Sleep(consumerDelay)
 			}
 			i++
 		case <-conv.conn.Done():

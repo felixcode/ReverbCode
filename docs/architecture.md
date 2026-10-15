@@ -16,6 +16,14 @@ both durable turn activation and controller event subscription have completed.
 Authentication reconciliation first checks for an eligible current completed turn;
 only a candidate triggers archived completion-proof decoding. This precheck does
 not replace the authoritative proof or infer authentication from a live process.
+ACP connections also use bounded SDK notification allowances: waiting capacity
+`AO_ACP_NOTIFICATION_QUEUE_CAPACITY` (default 16384) and retained wire bytes
+`AO_ACP_NOTIFICATION_QUEUE_BYTES` (default 16777216, including the active handler).
+Invalid/nonpositive overrides use defaults. Overflow still explicitly disconnects;
+the persistent journal remains authoritative for retry. No notification is silently
+dropped, and requests/responses keep the SDK's independent processing semantics.
+The exact v0.13.5 local SDK source and patch are documented in
+`third_party/acp-go-sdk/AO_PATCH.md`.
 
 A durable handoff can move a compatible native conversation between TUI and
 Chat, but both controllers are never live at once. The daemon coordinates both
