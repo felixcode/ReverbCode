@@ -373,21 +373,24 @@ var claudeModelAuthReport = func(ctx context.Context, binary, workingDir string,
 }
 
 // ProviderCatalogFingerprint returns the local identity inputs that scope a
-// Claude provider catalog. It includes the CLI-reported provider and the
-// resolved credential identity without exposing the credential itself.
+// Claude provider catalog. Cache reads must not launch an auth CLI: local
+// settings select the provider, and local credentials invalidate its catalog.
+// Discovery and launch validation still obtain fresh CLI evidence when needed.
 func ProviderCatalogFingerprint(ctx context.Context, binary, workingDir string, env map[string]string) string {
-	probeCtx, cancel := context.WithTimeout(ctx, claudeAuthProbeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, claudeAuthProbeTimeout)
 	defer cancel()
-	resolved := (&Plugin{}).resolveProviderContext(probeCtx, binary, workingDir, env, claudeModelAuthReport)
-	reported := ""
-	if resolved.cliOK {
-		reported = strings.TrimSpace(resolved.report.APIProvider)
-	}
+	opts := (agentcreds.ResolveOptions{
+		AllowKeychain: true,
+		WorkingDir:    workingDir,
+		CommandEnv:    env,
+	}).WithClaudeSettings(ctx)
+	provider, _ := agentcreds.ResolveProvider("", opts)
+	resolved, found := agentcreds.ResolveLocal(ctx, provider, opts)
 	credential := ""
-	if resolved.found {
-		credential = resolved.credential.Fingerprint()
+	if found {
+		credential = resolved.Fingerprint()
 	}
-	return string(resolved.provider) + "\x00" + reported + "\x00" + credential
+	return string(provider) + "\x00" + credential
 }
 
 // ProviderModels returns the Claude model IDs the configured provider actually
