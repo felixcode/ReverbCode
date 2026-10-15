@@ -127,11 +127,12 @@ type ACPState struct {
 
 // Transport is one authenticated attachment to a persistent provider host.
 type Transport struct {
-	Stdin         io.WriteCloser
-	Stdout        io.Reader
-	Reconnected   bool
-	NextRequestID int64
-	ACPState      *ACPState
+	Stdin            io.WriteCloser
+	Stdout           io.Reader
+	Reconnected      bool
+	NextRequestID    int64
+	ACPState         *ACPState
+	RecoveryEvidence func(context.Context, int64) ([]string, error)
 }
 
 type hello struct {
@@ -294,7 +295,7 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 		if err := validateDescriptor(cfg, d); err != nil && processalive.Alive(d.PID) {
 			return nil, err
 		}
-		transport, attachErr := attach(ctx, d, true)
+		transport, attachErr := attach(ctx, d, true, cfg.DataDir)
 		if attachErr == nil {
 			return transport, nil
 		}
@@ -311,7 +312,7 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 					return nil, ctx.Err()
 				case <-timer.C:
 				}
-				transport, attachErr = attach(ctx, d, true)
+				transport, attachErr = attach(ctx, d, true, cfg.DataDir)
 				if attachErr == nil {
 					return transport, nil
 				}
@@ -366,7 +367,7 @@ func ConnectOrStart(ctx context.Context, cfg Config) (*Transport, error) {
 			if compatibleErr := validateDescriptor(cfg, d); compatibleErr != nil {
 				return nil, compatibleErr
 			}
-			transport, attachErr := attach(ctx, d, false)
+			transport, attachErr := attach(ctx, d, false, cfg.DataDir)
 			if attachErr == nil {
 				return transport, nil
 			}
@@ -430,7 +431,7 @@ func Reconcile(ctx context.Context, dataDir string, keep map[string]struct{}) er
 	return errors.Join(errs...)
 }
 
-func attach(ctx context.Context, d Descriptor, reconnected bool) (*Transport, error) {
+func attach(ctx context.Context, d Descriptor, reconnected bool, dataDirs ...string) (*Transport, error) {
 	if d.Version != ProtocolVersion {
 		return nil, fmt.Errorf("%w: host=%d daemon=%d", ErrIncompatible, d.Version, ProtocolVersion)
 	}
@@ -472,8 +473,15 @@ func attach(ctx context.Context, d Descriptor, reconnected bool) (*Transport, er
 			return nil, errors.New(response.Error)
 		}
 	}
+	var recoveryEvidence func(context.Context, int64) ([]string, error)
+	if reconnected && response.ACPState != nil && response.ACPState.ActivePrompt && len(dataDirs) > 0 {
+		recoveryEvidence = func(ctx context.Context, budget int64) ([]string, error) {
+			return readACPRecoveryEvidence(ctx, dataDirs[0], d, response.ACPState.SessionID, budget)
+		}
+	}
 	return &Transport{
-		Stdin: conn, Stdout: reader, Reconnected: reconnected,
+		RecoveryEvidence: recoveryEvidence,
+		Stdin:            conn, Stdout: reader, Reconnected: reconnected,
 		NextRequestID: response.NextRequestID, ACPState: response.ACPState,
 	}, nil
 }

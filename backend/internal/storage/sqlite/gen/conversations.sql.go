@@ -1728,6 +1728,36 @@ func (q *Queries) ResolveConversationApproval(ctx context.Context, arg ResolveCo
 	return err
 }
 
+const restoreTransportFailedConversationTurn = `-- name: RestoreTransportFailedConversationTurn :execrows
+UPDATE conversation_turns
+SET state = 'running', error_message = '', completed_at = NULL,
+    controller_generation = ?1
+WHERE id = ?2 AND conversation_id = ?3
+  AND branch_id = ?4
+  AND state = 'failed' AND rolled_back_at IS NULL
+  AND error_message = 'controller ended before the turn completed'
+`
+
+type RestoreTransportFailedConversationTurnParams struct {
+	Generation     string
+	TurnID         string
+	ConversationID string
+	BranchID       string
+}
+
+func (q *Queries) RestoreTransportFailedConversationTurn(ctx context.Context, arg RestoreTransportFailedConversationTurnParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, restoreTransportFailedConversationTurn,
+		arg.Generation,
+		arg.TurnID,
+		arg.ConversationID,
+		arg.BranchID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const selectAuthenticationTurnCandidate = `-- name: SelectAuthenticationTurnCandidate :one
 SELECT 1 FROM conversation_turns t
 JOIN conversations c ON c.id = t.conversation_id
@@ -3353,6 +3383,48 @@ func (q *Queries) SelectFirstHumanTurnOnBranch(ctx context.Context, arg SelectFi
 	var id string
 	err := row.Scan(&id)
 	return id, err
+}
+
+const selectLiveRecoveryProviderTurns = `-- name: SelectLiveRecoveryProviderTurns :many
+SELECT DISTINCT CAST(json_extract(e.payload_json, '$.providerTurnId') AS TEXT) AS provider_turn_id
+FROM json_each(?1) AS replay
+CROSS JOIN conversation_provider_events e
+  ON e.conversation_id = ?2
+ AND e.provider_event_id <> ''
+ AND e.provider_event_id IN (CAST(replay.value AS TEXT), CAST(replay.value AS TEXT) || ':0')
+WHERE e.branch_id = ?3
+  AND COALESCE(json_extract(e.payload_json, '$.providerTurnId'), '') <> ''
+`
+
+type SelectLiveRecoveryProviderTurnsParams struct {
+	EventIds       interface{}
+	ConversationID string
+	BranchID       string
+}
+
+// Probe exact archived event identities before decoding payloads. Empty turn
+// correlation on control events is not evidence for a different prompt.
+func (q *Queries) SelectLiveRecoveryProviderTurns(ctx context.Context, arg SelectLiveRecoveryProviderTurnsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, selectLiveRecoveryProviderTurns, arg.EventIds, arg.ConversationID, arg.BranchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var provider_turn_id string
+		if err := rows.Scan(&provider_turn_id); err != nil {
+			return nil, err
+		}
+		items = append(items, provider_turn_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const selectNextQueuedConversationTurn = `-- name: SelectNextQueuedConversationTurn :one

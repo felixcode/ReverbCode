@@ -396,6 +396,23 @@ func (c *conversation) ActivateLiveReconnect(ctx context.Context, providerTurnID
 	return nil
 }
 
+// ReadLiveTurnRecoveryEvidence is available only for a live host still executing
+// its original prompt. The journal reader verifies the attached host and native
+// identity; it never consumes frames from the gated SDK connection.
+func (c *conversation) ReadLiveTurnRecoveryEvidence(ctx context.Context) ([]string, error) {
+	if c.proc.reconnected && c.liveState != nil && !c.liveState.ActivePrompt {
+		return nil, nil
+	}
+	if !c.proc.reconnected || c.liveState == nil || c.proc.recoveryEvidence == nil {
+		return nil, fmt.Errorf("%w: active prompt recovery evidence unavailable", ports.ErrChatRecoveryInconclusive)
+	}
+	ids, err := c.proc.recoveryEvidence(ctx, notificationQueueOptions().MaxNotificationBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: active prompt journal evidence: %w", ports.ErrChatRecoveryInconclusive, err)
+	}
+	return ids, nil
+}
+
 // SendTurn prepares the long-lived ACP prompt request. AO's controller starts it
 // through StartDeferredTurn only after the provider turn id is durable.
 func (c *conversation) SendTurn(ctx context.Context, msg ports.ChatUserMessage) (ports.ChatTurnRef, error) {

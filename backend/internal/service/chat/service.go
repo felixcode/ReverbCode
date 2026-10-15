@@ -834,6 +834,39 @@ func (s *Service) Start(ctx context.Context, cfg StartConfig) (*Controller, erro
 	var commitProviderHistory func(context.Context) error
 	if liveReconnect {
 		providerTurnID := controller.restoreLiveTurnOwnership(liveRows.Turns)
+		if providerTurnID == "" {
+			if evidenceReader, ok := conv.(ports.ChatLiveTurnRecoveryEvidenceReader); ok {
+				ids, evidenceErr := evidenceReader.ReadLiveTurnRecoveryEvidence(ctx)
+				if evidenceErr != nil {
+					_ = cleanupUnpublishedConversation(conv, false)
+					return nil, fmt.Errorf("%w: live prompt recovery evidence: %w", ports.ErrChatRecoveryInconclusive, evidenceErr)
+				}
+				if len(ids) > 0 {
+					recoveryStore, available := s.store.(interface {
+						RecoverLiveTransportTurn(context.Context, string, domain.SessionID, string, string, []string, time.Time) (domain.ConversationTurn, error)
+					})
+					if !available {
+						evidenceErr = errors.New("live transport turn recovery store unavailable")
+					} else {
+						var recovered domain.ConversationTurn
+						recovered, evidenceErr = recoveryStore.RecoverLiveTransportTurn(ctx, conversation.ID, cfg.SessionID, generation, conv.ProviderConversationID(), ids, s.now())
+						if evidenceErr == nil {
+							providerTurnID = controller.restoreLiveTurnOwnership([]domain.ConversationTurn{recovered})
+						}
+					}
+					if evidenceErr != nil {
+						_ = cleanupUnpublishedConversation(conv, false)
+						return nil, fmt.Errorf("%w: reconcile live transport turn: %w", ports.ErrChatRecoveryInconclusive, evidenceErr)
+					}
+				}
+				// An idle host or unavailable evidence leaves the original activator
+				// checks authoritative. Cancellation is never converted to liveness.
+				if ctx.Err() != nil {
+					_ = cleanupUnpublishedConversation(conv, false)
+					return nil, ctx.Err()
+				}
+			}
+		}
 		if activator, ok := conv.(ports.ChatLiveReconnectActivator); ok {
 			if err := activator.ActivateLiveReconnect(ctx, providerTurnID); err != nil {
 				_ = cleanupUnpublishedConversation(conv, false)

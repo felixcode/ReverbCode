@@ -1709,3 +1709,24 @@ WHERE t.conversation_id = sqlc.arg(conversation_id)
     ORDER BY e.id DESC LIMIT 1
   ) IS NOT NULL
 ORDER BY t.completed_at DESC LIMIT 1;
+
+-- name: SelectLiveRecoveryProviderTurns :many
+-- Probe exact archived event identities before decoding payloads. Empty turn
+-- correlation on control events is not evidence for a different prompt.
+SELECT DISTINCT CAST(json_extract(e.payload_json, '$.providerTurnId') AS TEXT) AS provider_turn_id
+FROM json_each(sqlc.arg(event_ids)) AS replay
+CROSS JOIN conversation_provider_events e
+  ON e.conversation_id = sqlc.arg(conversation_id)
+ AND e.provider_event_id <> ''
+ AND e.provider_event_id IN (CAST(replay.value AS TEXT), CAST(replay.value AS TEXT) || ':0')
+WHERE e.branch_id = sqlc.arg(branch_id)
+  AND COALESCE(json_extract(e.payload_json, '$.providerTurnId'), '') <> '';
+
+-- name: RestoreTransportFailedConversationTurn :execrows
+UPDATE conversation_turns
+SET state = 'running', error_message = '', completed_at = NULL,
+    controller_generation = sqlc.arg(generation)
+WHERE id = sqlc.arg(turn_id) AND conversation_id = sqlc.arg(conversation_id)
+  AND branch_id = sqlc.arg(branch_id)
+  AND state = 'failed' AND rolled_back_at IS NULL
+  AND error_message = 'controller ended before the turn completed';

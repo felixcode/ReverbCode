@@ -24,6 +24,16 @@ the persistent journal remains authoritative for retry. No notification is silen
 dropped, and requests/responses keep the SDK's independent processing semantics.
 The exact v0.13.5 local SDK source and patch are documented in
 `third_party/acp-go-sdk/AO_PATCH.md`.
+A legacy transport overflow can have settled an active host's durable turn as
+`controller ended before the turn completed`. Reconnect may repair only that
+exact cleanup failure, with the same authenticated host descriptor/native ID,
+active branch and unique journal-event-to-archived-provider-turn mapping. The
+whole read-only journal snapshot uses the configured ACP byte budget; it does
+not guess ownership from a fixed prefix or prompt text. The original turn and
+an audit event change atomically behind the current generation fence. Explicit
+interruption, real provider errors, ambiguous/missing evidence and changed
+ownership remain inconclusive. Neither authentication nor the prompt is replayed.
+
 
 A durable handoff can move a compatible native conversation between TUI and
 Chat, but both controllers are never live at once. The daemon coordinates both

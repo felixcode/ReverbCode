@@ -1146,6 +1146,12 @@ type ChatLiveReconnectActivator interface {
 	ActivateLiveReconnect(ctx context.Context, providerTurnID string) error
 }
 
+// ChatLiveTurnRecoveryEvidenceReader exposes metadata from the same active prompt
+// journal without advancing protocol replay or dispatching another prompt.
+type ChatLiveTurnRecoveryEvidenceReader interface {
+	ReadLiveTurnRecoveryEvidence(context.Context) ([]string, error)
+}
+
 // ChatProviderEventAcknowledger lets a persistent provider discard replay
 // state only after the controller commits the matching event.
 type ChatProviderEventAcknowledger interface {
