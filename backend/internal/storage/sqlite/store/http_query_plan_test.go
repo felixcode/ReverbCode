@@ -113,8 +113,8 @@ func TestCurrentHeadReviewBatchMatchesOriginalLatestFactsWithoutCorrelatedScan(t
 	db.SetMaxOpenConns(1)
 	for _, q := range []string{
 		`CREATE TABLE pr(url TEXT PRIMARY KEY,head_sha TEXT)`,
-		`CREATE TABLE review_run(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,harness TEXT NOT NULL,pr_url TEXT NOT NULL,target_sha TEXT,status TEXT,verdict TEXT,created_at TIMESTAMP NOT NULL,body TEXT)`,
-		`CREATE INDEX idx_review_run_session_batch ON review_run(session_id,created_at) WHERE status='running'`,
+		`CREATE TABLE review_run(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,harness TEXT NOT NULL,pr_url TEXT NOT NULL,target_sha TEXT,status TEXT,verdict TEXT,created_at TIMESTAMP NOT NULL,body TEXT,batch_id TEXT NOT NULL DEFAULT '')`,
+		`CREATE INDEX idx_review_run_session_batch ON review_run(session_id,batch_id,created_at) WHERE batch_id<>''`,
 		`CREATE UNIQUE INDEX idx_review_run_session_pr_sha_harness ON review_run(session_id,pr_url,target_sha,harness) WHERE target_sha<>'' AND status='running'`,
 	} {
 		if _, err = db.Exec(q); err != nil {
@@ -151,12 +151,12 @@ func TestCurrentHeadReviewBatchMatchesOriginalLatestFactsWithoutCorrelatedScan(t
 		{"later-cancelled", "s4", "codex", "p1", "h1", "cancelled", "", 1},
 	}
 	for _, r := range fixtures {
-		if _, err = db.Exec("INSERT INTO review_run VALUES(?,?,?,?,?,?,?,?,?)", r.id, r.session, r.harness, r.pr, r.target, r.status, r.verdict, now.Add(time.Duration(r.second)*time.Second), "body must not be selected"); err != nil {
+		if _, err = db.Exec("INSERT INTO review_run(id,session_id,harness,pr_url,target_sha,status,verdict,created_at,body) VALUES(?,?,?,?,?,?,?,?,?)", r.id, r.session, r.harness, r.pr, r.target, r.status, r.verdict, now.Add(time.Duration(r.second)*time.Second), "body must not be selected"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := 0; i < 100; i++ {
-		if _, err = db.Exec("INSERT INTO review_run VALUES(?,?,?,?,?,?,?,?,?)", fmt.Sprintf("unrelated-%d", i), "unwanted", "codex", "p1", "h1", "completed", "approved", now, strings.Repeat("private synthetic body ", 100)); err != nil {
+		if _, err = db.Exec("INSERT INTO review_run(id,session_id,harness,pr_url,target_sha,status,verdict,created_at,body) VALUES(?,?,?,?,?,?,?,?,?)", fmt.Sprintf("unrelated-%d", i), "unwanted", "codex", "p1", "h1", "completed", "approved", now, strings.Repeat("private synthetic body ", 100)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -207,7 +207,7 @@ func TestCurrentHeadReviewBatchMatchesOriginalLatestFactsWithoutCorrelatedScan(t
 	}
 	// SQLite TEXT PRIMARY KEY permits NULL; the domain reader rejects it. The
 	// optimization must not hide a malformed latest row behind a valid tie.
-	if _, err = db.Exec("INSERT INTO review_run VALUES(NULL,?,?,?,?,?,?,?,?)", "s1", "codex", "p1", "h1", "completed", "approved", now.Add(time.Second), "malformed synthetic row"); err != nil {
+	if _, err = db.Exec("INSERT INTO review_run(id,session_id,harness,pr_url,target_sha,status,verdict,created_at,body) VALUES(NULL,?,?,?,?,?,?,?,?)", "s1", "codex", "p1", "h1", "completed", "approved", now.Add(time.Second), "malformed synthetic row"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = gen.New(db).ListCurrentHeadReviewRunsBySessions(context.Background(), `["s1"]`); err == nil {
