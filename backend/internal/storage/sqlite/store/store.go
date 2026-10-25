@@ -25,6 +25,8 @@ type Store struct {
 	qw      *gen.Queries // bound to the single writer connection
 	qr      *gen.Queries // bound to the reader pool
 	writeMu *contextMutex
+ readOnly bool
+ historyRetentionAbsent bool
 
 	agentSwitchFailureEventMetadata *domain.AgentSwitchEventMetadata
 	agentSwitchFailureEventEncoder  ports.AgentSwitchFailureEventEncoder
