@@ -334,8 +334,7 @@ func (c *ConversationsController) editMessage(w http.ResponseWriter, r *http.Req
 		writeConversationEditError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, EditConversationMessageResponse{
-		ContentExpired: msg.ContentExpired, SourceBranchID: result.SourceBranchID,
+	envelope.WriteJSON(w, http.StatusAccepted, EditConversationMessageResponse{ SourceBranchID: result.SourceBranchID,
 		ActiveBranchID: result.ActiveBranchID,
 		TurnID:         result.Turn.ID,
 		ProviderTurnID: result.Turn.ProviderTurnID,
@@ -1160,6 +1159,7 @@ func conversationSnapshotResponse(s chatsvc.Snapshot) ConversationSnapshotRespon
 
 	for _, msg := range s.Messages {
 		message := ConversationMessageResponse{
+ ContentExpired: msg.ContentExpired,
 			Kind:              "message",
 			ID:                msg.ID,
 			TurnID:            msg.TurnID,
