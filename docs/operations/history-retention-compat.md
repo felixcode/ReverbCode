@@ -76,3 +76,23 @@ unmodified. Their generated session readers substitute the fixed expiry expressi
 with false; snapshot readers skip absent markers. This adapts each query, including
 transactional readers and fresh pool connections, without creating TEMP tables,
 changing the historical schema, or writing a read-only source.
+
+## Cold replay cost and legacy send responses
+
+Cold import still reads/validates/reconciles native history before publication.
+It checks bounded batches of exact nonempty `(conversation_id, provider_event_id)`
+archive keys after reconciliation; a committed key means the existing atomic
+archive+projection already won, so no body marshal, retention parse or writer is
+needed for that event. Unseen IDs, new suffixes/items and empty IDs retain the
+original path. The positive set lives only for that cold import batch, under the
+current generation; an existing projection transaction supplies its own snapshot.
+No transcript truncation, new reader protocol or increased timeout is involved.
+
+The expiry query explicitly includes the nonempty predicates on all four native
+ID columns, allowing SQLite to use their existing partial indexes. This changes
+no expiry/terminal/owner rule or database schema. Legacy `/sessions/{id}/send`
+now maps the same two typed not-ready failures as the conversation route to409;
+other errors keep their prior classification. A200 acknowledges acceptance
+(including durable queuing), not provider execution/delivery, and never authorizes
+automatic resend. Provisioned workspace/controller facts must be distinguished
+from the display readiness of a partially created session.
