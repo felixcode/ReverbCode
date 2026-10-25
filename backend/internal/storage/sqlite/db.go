@@ -188,7 +188,7 @@ func OpenReadOnly(ctx context.Context, dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite read-only reader: %w", err)
 	}
 
-	compatible, err := sqlitestore.NewReadOnlyStore(writeDB, readDB)
+	compatible, err := sqlitestore.NewReadOnlyStore(ctx, writeDB, readDB)
 	if err != nil {
 		_ = readDB.Close()
 		_ = writeDB.Close()

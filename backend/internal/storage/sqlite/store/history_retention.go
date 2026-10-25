@@ -262,9 +262,9 @@ func (r legacyHistoryReader) QueryRowContext(ctx context.Context, query string, 
 	return r.DBTX.QueryRowContext(ctx, strings.ReplaceAll(query, sessionPromptExpiryExpression, "0 AS prompt_expired"), args...)
 }
 
-func NewReadOnlyStore(writeDB, readDB *sql.DB) (*Store, error) {
+func NewReadOnlyStore(ctx context.Context, writeDB, readDB *sql.DB) (*Store, error) {
 	var present bool
-	if err := readDB.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ao_history_retention')`).Scan(&present); err != nil {
+	if err := readDB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ao_history_retention')`).Scan(&present); err != nil {
 		return nil, err
 	}
 	s := NewStore(writeDB, readDB)
