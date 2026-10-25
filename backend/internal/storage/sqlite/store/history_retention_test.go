@@ -121,7 +121,7 @@ func TestRetentionStoreKeepsStubsAndArchiveAfterLateEvents(t *testing.T) {
 		t.Fatalf("expired retry allowed: %v", err)
 	}
 	called := false
-	payload := `{"providerTurnId":"native","text":"PRIVATE-OLD-BODY","error":null,"turnState":"completed","unknownFact":3}`
+	payload := `{"providerTurnId":"native","providerItemId":"changed-native-id","delta":"PRIVATE-OLD-BODY","text":"PRIVATE-OLD-BODY","summary":"PRIVATE-OLD-BODY","detail":{"body":"PRIVATE-OLD-BODY"},"diff":{"body":"PRIVATE-OLD-BODY"},"input":{"body":"PRIVATE-OLD-BODY"},"plan":{"body":"PRIVATE-OLD-BODY"},"error":null,"turnState":"completed","unknownFact":3}`
 	if _, err = s.ProjectProviderEvent(ctx, conv.ID, session.ID, "generation", "late", "message/completed", payload, time.Now(), func(context.Context) error { called = true; return nil }); err != nil {
 		t.Fatal(err)
 	}

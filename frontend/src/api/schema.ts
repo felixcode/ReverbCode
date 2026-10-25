@@ -3752,6 +3752,7 @@ export interface components {
         ConversationActivityResponse: {
             /** @enum {string} */
             activityKind: "command" | "file_change" | "plan" | "reasoning" | "approval" | "usage" | "error" | "system" | "mcp_tool" | "auto_review" | "user_input";
+            contentExpired?: boolean;
             createdAt: string;
             detail?: {
                 [key: string]: unknown;
@@ -3832,6 +3833,7 @@ export interface components {
         };
         ConversationMessageResponse: {
             content?: components["schemas"]["ConversationContentSummaryResponse"][];
+            contentExpired?: boolean;
             createdAt: string;
             editAvailable: boolean;
             id: string;
@@ -3955,6 +3957,7 @@ export interface components {
         };
         ConversationTurnResponse: {
             completedAt?: null | string;
+            contentExpired?: boolean;
             diff?: components["schemas"]["ConversationTurnDiffResponse"];
             errorMessage?: string;
             hasRetryAttempt?: boolean;
