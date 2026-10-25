@@ -137,7 +137,7 @@ type SessionMetadata struct {
 	AgentSessionIDLaunchID   string    `json:"-"`
 	NativeIdentityObservedAt time.Time `json:"-"`
 	Prompt                   string    `json:"prompt,omitempty"`
- PromptExpired bool `json:"promptExpired,omitempty"`
+	PromptExpired            bool      `json:"promptExpired,omitempty"`
 	// LatestUserPrompt is the latest real user-authored task direction observed
 	// for this AO session. Internal AO coordination messages (for example an
 	// agent-switch handoff request) must not replace it.

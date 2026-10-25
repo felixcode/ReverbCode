@@ -605,9 +605,11 @@ func (s *Store) commitChatSpawn(
 			if rows != 1 {
 				return fmt.Errorf("stage Chat controller generation: Chat session %s not found", rec.ID)
 			}
-			if expiredPayload { return true,nil }
- txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
- txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
+			if expiredPayload {
+				return true, nil
+			}
+			txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
+			txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
 			if err := prepare(txCtx); err != nil {
 				return fmt.Errorf("project native provider history: %w", err)
 			}
@@ -2818,7 +2820,7 @@ func (s *Store) projectProviderEvent(
 func projectProviderEventTx(
 	ctx context.Context,
 	q *gen.Queries,
- db gen.DBTX,
+	db gen.DBTX,
 	conversationID string,
 	session domain.SessionID,
 	reviewID, generation, providerEventID, method, payloadJSON string,
@@ -2843,9 +2845,11 @@ func projectProviderEventTx(
 		}
 	}
 	var redactErr error
- var expiredPayload bool
- payloadJSON, expiredPayload, redactErr = redactExpiredProviderPayload(ctx,db,conversationID,payloadJSON)
- if redactErr != nil {return false,redactErr}
+	var expiredPayload bool
+	payloadJSON, expiredPayload, redactErr = redactExpiredProviderPayload(ctx, db, conversationID, payloadJSON)
+	if redactErr != nil {
+		return false, redactErr
+	}
 	inserted, err := q.InsertConversationProviderEvent(ctx, gen.InsertConversationProviderEventParams{
 		ConversationID:  conversationID,
 		SessionID:       session,
@@ -3080,8 +3084,12 @@ func (s *Store) LoadConversationSnapshotPage(
 	beforeSequence int64,
 	limit int64,
 ) (ConversationSnapshot, error) {
- tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly:true}); if err != nil {return ConversationSnapshot{},err}; defer tx.Rollback()
- q := s.qr.WithTx(tx)
+	tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ConversationSnapshot{}, err
+	}
+	defer tx.Rollback()
+	q := s.qr.WithTx(tx)
 
 	conv, err := q.SelectConversationByID(ctx, conversationID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3222,7 +3230,9 @@ func (s *Store) LoadConversationSnapshotPage(
 			snapshot.Activities = append(snapshot.Activities, activityToDomain(activityRows[i]))
 		}
 	}
- if err := s.applyHistoryRetention(ctx,tx,conversationID,&snapshot); err != nil {return ConversationSnapshot{},err}
+	if err := s.applyHistoryRetention(ctx, tx, conversationID, &snapshot); err != nil {
+		return ConversationSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
@@ -3295,8 +3305,12 @@ func (s *Store) LoadConversationSnapshot(
 	ctx context.Context,
 	conversationID string,
 ) (ConversationSnapshot, error) {
- tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly:true}); if err != nil {return ConversationSnapshot{},err}; defer tx.Rollback()
- q := s.qr.WithTx(tx)
+	tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ConversationSnapshot{}, err
+	}
+	defer tx.Rollback()
+	q := s.qr.WithTx(tx)
 
 	conv, err := q.SelectConversationByID(ctx, conversationID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3362,7 +3376,9 @@ func (s *Store) LoadConversationSnapshot(
 	for _, row := range activityRows {
 		snapshot.Activities = append(snapshot.Activities, activityToDomain(row))
 	}
- if err := s.applyHistoryRetention(ctx,tx,conversationID,&snapshot); err != nil {return ConversationSnapshot{},err}
+	if err := s.applyHistoryRetention(ctx, tx, conversationID, &snapshot); err != nil {
+		return ConversationSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
@@ -3792,8 +3808,13 @@ func (s *Store) ProviderEventsSince(
 // re-dispatching it as a new turn. The content is loaded from AO's own rows
 // rather than from a client request that could be stale or substituted.
 func (s *Store) RetryPrompt(ctx context.Context, conversationID, turnID string) (domain.RetryPrompt, error) {
- var expired bool
- if err := s.readDB.QueryRowContext(ctx,`SELECT EXISTS(SELECT 1 FROM ao_history_retention r LEFT JOIN conversation_messages m ON r.object_kind='message' AND r.object_id=m.id WHERE r.conversation_id=? AND ((r.object_kind='turn' AND r.object_id=?) OR (m.turn_id=? AND m.role='user')))`,conversationID,turnID,turnID).Scan(&expired);err!=nil{return domain.RetryPrompt{},err};if expired{return domain.RetryPrompt{},errors.New("conversation prompt content has expired; submit a new prompt")}
+	var expired bool
+	if err := s.readDB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ao_history_retention r LEFT JOIN conversation_messages m ON r.object_kind='message' AND r.object_id=m.id WHERE r.conversation_id=? AND ((r.object_kind='turn' AND r.object_id=?) OR (m.turn_id=? AND m.role='user')))`, conversationID, turnID, turnID).Scan(&expired); err != nil {
+		return domain.RetryPrompt{}, err
+	}
+	if expired {
+		return domain.RetryPrompt{}, errors.New("conversation prompt content has expired; submit a new prompt")
+	}
 
 	row, err := s.qr.SelectRetryableConversationPrompt(ctx, gen.SelectRetryableConversationPromptParams{
 		ID: turnID, ConversationID: conversationID,

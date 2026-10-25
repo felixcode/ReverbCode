@@ -2675,7 +2675,7 @@ type CompactConversationResponse struct {
 
 // ConversationTurnResponse is one request and the work that followed it.
 type ConversationTurnResponse struct {
- ContentExpired bool `json:"contentExpired,omitempty"`
+	ContentExpired bool   `json:"contentExpired,omitempty"`
 	ID             string `json:"id"`
 	State          string `json:"state" enum:"queued,running,completed,recovered,interrupted,failed,cancelled"`
 	ProviderTurnID string `json:"providerTurnId,omitempty"`
@@ -2755,7 +2755,7 @@ type ConversationDiffFileResponse struct {
 
 // ConversationMessageResponse is one readable block of text.
 type ConversationMessageResponse struct {
- ContentExpired bool `json:"contentExpired,omitempty"`
+	ContentExpired    bool                                 `json:"contentExpired,omitempty"`
 	Kind              string                               `json:"kind" enum:"message"`
 	ID                string                               `json:"id"`
 	TurnID            string                               `json:"turnId,omitempty"`
@@ -2776,12 +2776,12 @@ type ConversationMessageResponse struct {
 
 // ConversationActivityResponse is one non-message timeline entry.
 type ConversationActivityResponse struct {
- ContentExpired bool `json:"contentExpired,omitempty"`
-	Kind     string `json:"kind" enum:"activity"`
-	ID       string `json:"id"`
-	TurnID   string `json:"turnId,omitempty"`
-	Sequence int64  `json:"sequence"`
-	Revision int64  `json:"revision"`
+	ContentExpired bool   `json:"contentExpired,omitempty"`
+	Kind           string `json:"kind" enum:"activity"`
+	ID             string `json:"id"`
+	TurnID         string `json:"turnId,omitempty"`
+	Sequence       int64  `json:"sequence"`
+	Revision       int64  `json:"revision"`
 	// ActivityKind discriminates the payload in Detail.
 	//
 	// mcp_tool is not command: an MCP call has a server, a tool name, structured
