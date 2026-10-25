@@ -961,10 +961,38 @@ func nativeHistorySettleDelay(refresh int) time.Duration {
 // projectNativeHistory durably imports a previously reconciled snapshot.
 // Re-running it is safe because history events carry stable identities and
 // ProjectProviderEvent deduplicates archive+projection together.
+type nativeHistoryArchiveReader interface {
+	ArchivedProviderEventIDs(context.Context, string, domain.SessionID, string, string, []string) (map[string]bool, error)
+}
+
 func (c *Controller) projectNativeHistory(ctx context.Context, events []ports.ChatEvent) error {
-	for _, event := range events {
-		if _, _, err := c.projectEvent(ctx, event); err != nil {
-			return fmt.Errorf("import native history event %s: %w", event.Kind, err)
+	archive, indexed := c.store.(nativeHistoryArchiveReader)
+	for start := 0; start < len(events); start += 256 {
+		end := min(start+256, len(events))
+		var known map[string]bool
+		if indexed {
+			ids := make([]string, 0, end-start)
+			for _, event := range events[start:end] {
+				if event.ProviderEventID != "" {
+					ids = append(ids, event.ProviderEventID)
+				}
+			}
+			var err error
+			known, err = archive.ArchivedProviderEventIDs(ctx, c.conversation.ID, c.sessionID, c.reviewID, c.generation, ids)
+			if err != nil {
+				return fmt.Errorf("read committed native history identities: %w", err)
+			}
+		}
+		for _, event := range events[start:end] {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if event.ProviderEventID != "" && known[event.ProviderEventID] {
+				continue
+			}
+			if _, _, err := c.projectEvent(ctx, event); err != nil {
+				return fmt.Errorf("import native history event %s: %w", event.Kind, err)
+			}
 		}
 	}
 	return nil

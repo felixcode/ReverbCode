@@ -159,6 +159,14 @@ func (s *Store) applyHistoryRetention(ctx context.Context, db gen.DBTX, conversa
 
 // Only an already-expired logical turn can suppress incoming prose. This never
 // matches by a global content hash, so identical messages in new turns survive.
+// Column predicates make the existing partial native-ID indexes eligible.
+const expiredProviderPayloadSQL = `SELECT EXISTS(
+ SELECT 1 FROM conversation_turns t JOIN ao_history_retention r ON r.object_kind='turn' AND r.object_id=t.id WHERE ?<>'' AND t.conversation_id=? AND t.provider_turn_id=? AND t.provider_turn_id<>'' AND t.state NOT IN ('queued','running')
+ UNION ALL SELECT 1 FROM conversation_messages m JOIN conversation_turns t ON t.id=m.turn_id JOIN ao_history_retention r ON r.object_kind='message' AND r.object_id=m.id WHERE ?<>'' AND m.conversation_id=? AND m.provider_item_id=? AND m.provider_item_id<>'' AND t.state NOT IN ('queued','running')
+ UNION ALL SELECT 1 FROM conversation_messages m JOIN conversation_turns t ON t.id=m.turn_id JOIN ao_history_retention r ON r.object_kind='message' AND r.object_id=m.id WHERE ?<>'' AND m.conversation_id=? AND m.client_message_id=? AND m.client_message_id<>'' AND t.state NOT IN ('queued','running')
+ UNION ALL SELECT 1 FROM conversation_activities a JOIN conversation_turns t ON t.id=a.turn_id JOIN ao_history_retention r ON r.object_kind='activity' AND r.object_id=a.id WHERE ?<>'' AND a.conversation_id=? AND a.provider_item_id=? AND a.provider_item_id<>'' AND t.state NOT IN ('queued','running')
+ )`
+
 func redactExpiredProviderPayload(ctx context.Context, db gen.DBTX, conversationID, payload string) (string, bool, error) {
 	var body map[string]json.RawMessage
 	if json.Unmarshal([]byte(payload), &body) != nil {
@@ -176,12 +184,7 @@ func redactExpiredProviderPayload(ctx context.Context, db gen.DBTX, conversation
 		return payload, false, nil
 	}
 	var expired bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS(
- SELECT 1 FROM conversation_turns t JOIN ao_history_retention r ON r.object_kind='turn' AND r.object_id=t.id WHERE ?<>'' AND t.conversation_id=? AND t.provider_turn_id=? AND t.state NOT IN ('queued','running')
- UNION ALL SELECT 1 FROM conversation_messages m JOIN conversation_turns t ON t.id=m.turn_id JOIN ao_history_retention r ON r.object_kind='message' AND r.object_id=m.id WHERE ?<>'' AND m.conversation_id=? AND m.provider_item_id=? AND t.state NOT IN ('queued','running')
- UNION ALL SELECT 1 FROM conversation_messages m JOIN conversation_turns t ON t.id=m.turn_id JOIN ao_history_retention r ON r.object_kind='message' AND r.object_id=m.id WHERE ?<>'' AND m.conversation_id=? AND m.client_message_id=? AND t.state NOT IN ('queued','running')
- UNION ALL SELECT 1 FROM conversation_activities a JOIN conversation_turns t ON t.id=a.turn_id JOIN ao_history_retention r ON r.object_kind='activity' AND r.object_id=a.id WHERE ?<>'' AND a.conversation_id=? AND a.provider_item_id=? AND t.state NOT IN ('queued','running')
- )`, providerTurnID, conversationID, providerTurnID, itemID, conversationID, itemID, clientID, conversationID, clientID, itemID, conversationID, itemID).Scan(&expired)
+	err := db.QueryRowContext(ctx, expiredProviderPayloadSQL, providerTurnID, conversationID, providerTurnID, itemID, conversationID, itemID, clientID, conversationID, clientID, itemID, conversationID, itemID).Scan(&expired)
 	if err != nil {
 		return "", false, err
 	}

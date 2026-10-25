@@ -33,6 +33,7 @@ import (
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
+	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 	"github.com/aoagents/agent-orchestrator/backend/pkg/contract"
@@ -4550,5 +4551,57 @@ func TestSessionsAPI_InteractionRecencyKeepsHumanTimestampSeparate(t *testing.T)
 	}
 	if !response.Session.LastInteractionAt.Equal(rec.Metadata.LatestUserPromptAt) {
 		t.Fatalf("new human recency=%v", response.Session.LastInteractionAt)
+	}
+}
+
+type sendFailureSessionService struct {
+	*fakeSessionService
+	failure error
+	calls   int
+}
+
+func (f *sendFailureSessionService) Send(context.Context, domain.SessionID, string, *ports.SpawnAttachment) error {
+	f.calls++
+	return f.failure
+}
+func (f *sendFailureSessionService) SendWithOptions(context.Context, domain.SessionID, string, *ports.SpawnAttachment, ports.MessageDeliveryOptions) error {
+	f.calls++
+	return f.failure
+}
+
+func TestSessionsSendTypedNotReadyAndAcceptedSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"no controller", chatsvc.ErrNoController, http.StatusConflict, "CHAT_CONTROLLER_NOT_READY"},
+		{"not provisioning", chatsvc.ErrNotProvisioning, http.StatusConflict, "CHAT_CONTROLLER_NOT_READY"},
+		{"timeout retains503", errors.Join(chatsvc.ErrNoController, context.DeadlineExceeded), http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE"},
+		{"durably accepted", nil, http.StatusOK, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &sendFailureSessionService{fakeSessionService: newFakeSessionService(), failure: tc.err}
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Sessions: svc}, httpd.ControlDeps{}))
+			t.Cleanup(srv.Close)
+			body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/send", `{"message":"queued input"}`)
+			if tc.code != "" {
+				assertErrorCode(t, body, status, tc.status, tc.code)
+			} else {
+				if status != http.StatusOK {
+					t.Fatalf("accepted status=%d", status)
+				}
+				var result map[string]any
+				mustJSON(t, body, &result)
+				if result["ok"] != true || result["delivered"] != nil || result["executed"] != nil {
+					t.Fatal("acceptance falsely claimed execution")
+				}
+			}
+			if svc.calls != 1 {
+				t.Fatal("send was automatically retried")
+			}
+		})
 	}
 }

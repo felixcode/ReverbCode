@@ -30,11 +30,13 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/attachmentstore"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
+	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
@@ -1901,6 +1903,11 @@ func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 		err = sender.SendWithOptions(r.Context(), sessionID(r), message, attachment, ports.MessageDeliveryOptions{AuthoredByUser: in.UserAuthored, SenderSessionID: in.SenderSessionID})
 	} else {
 		err = c.Svc.Send(r.Context(), sessionID(r), message, attachment)
+	}
+	var classified *apierr.Error
+	if !errors.As(err, &classified) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && (errors.Is(err, chatsvc.ErrNoController) || errors.Is(err, chatsvc.ErrNotProvisioning)) {
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "CHAT_CONTROLLER_NOT_READY", "the agent controller for this session is not running", nil)
+		return
 	}
 	if err != nil {
 		envelope.WriteError(w, r, err)
