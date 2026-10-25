@@ -155,8 +155,7 @@ WITH wanted_session AS (
     SELECT CAST(j.value AS TEXT) AS session_id
     FROM json_each(?) AS j
 ), ranked_run AS (
-    SELECT review_run.session_id, review_run.id, review_run.harness,
-           review_run.pr_url, review_run.status, review_run.verdict, review_run.created_at,
+    SELECT review_run.id,
            ROW_NUMBER() OVER (
                PARTITION BY review_run.session_id, review_run.pr_url, review_run.target_sha, review_run.harness
                ORDER BY review_run.created_at DESC, review_run.id DESC
@@ -167,10 +166,11 @@ WITH wanted_session AS (
       AND review_run.target_sha = pr.head_sha
       AND review_run.session_id IN (SELECT session_id FROM wanted_session)
 )
-SELECT ranked_run.session_id, ranked_run.id, ranked_run.harness, ranked_run.pr_url,
-       ranked_run.status, ranked_run.verdict, ranked_run.created_at
+SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_url,
+       review_run.status, review_run.verdict, review_run.created_at
 FROM ranked_run
-JOIN wanted_session ON wanted_session.session_id = ranked_run.session_id
+JOIN review_run ON review_run.id = ranked_run.id
+JOIN wanted_session ON wanted_session.session_id = review_run.session_id
 WHERE ranked_run.same_head_rank = 1;
 
 -- name: FailUnsubmittedReviewBatchForChatTurn :exec
