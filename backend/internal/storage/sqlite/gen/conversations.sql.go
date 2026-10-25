@@ -243,6 +243,45 @@ func (q *Queries) AppendConversationActivityOutput(ctx context.Context, arg Appe
 	return result.RowsAffected()
 }
 
+const appendConversationActivityOutputNonempty = `-- name: AppendConversationActivityOutputNonempty :execrows
+UPDATE conversation_activities
+SET command_output = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.command_output ELSE substr(command_output || ?1, 1, ?2) END,
+    command_output_truncated = CASE
+        WHEN length(command_output) + length(?1) > ?2 THEN 1
+        ELSE command_output_truncated
+    END,
+    revision = revision + 1,
+    updated_at = ?3
+WHERE conversation_activities.conversation_id = ?4
+  AND provider_item_id <> '' AND provider_item_id = ?5
+  AND status <> 'cancelled'
+  AND command_output_truncated = 0
+`
+
+type AppendConversationActivityOutputNonemptyParams struct {
+	Delta          string
+	MaxOutputChars int64
+	UpdatedAt      time.Time
+	ConversationID string
+	ProviderItemID string
+}
+
+// Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+// the original query above, including matching more than one legacy row.
+func (q *Queries) AppendConversationActivityOutputNonempty(ctx context.Context, arg AppendConversationActivityOutputNonemptyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, appendConversationActivityOutputNonempty,
+		arg.Delta,
+		arg.MaxOutputChars,
+		arg.UpdatedAt,
+		arg.ConversationID,
+		arg.ProviderItemID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const appendConversationActivityStreamedText = `-- name: AppendConversationActivityStreamedText :execrows
 UPDATE conversation_activities
 SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE substr(streamed_text || ?1, 1, ?2) END,
@@ -295,6 +334,45 @@ func (q *Queries) AppendConversationActivityStreamedText(ctx context.Context, ar
 	return result.RowsAffected()
 }
 
+const appendConversationActivityStreamedTextNonempty = `-- name: AppendConversationActivityStreamedTextNonempty :execrows
+UPDATE conversation_activities
+SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE substr(streamed_text || ?1, 1, ?2) END,
+    streamed_text_truncated = CASE
+        WHEN length(streamed_text) + length(?1) > ?2 THEN 1
+        ELSE streamed_text_truncated
+    END,
+    revision = revision + 1,
+    updated_at = ?3
+WHERE conversation_activities.conversation_id = ?4
+  AND provider_item_id <> '' AND provider_item_id = ?5
+  AND status <> 'cancelled'
+  AND streamed_text_truncated = 0
+`
+
+type AppendConversationActivityStreamedTextNonemptyParams struct {
+	Delta          string
+	MaxTextChars   int64
+	UpdatedAt      time.Time
+	ConversationID string
+	ProviderItemID string
+}
+
+// Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+// the original query above, including matching more than one legacy row.
+func (q *Queries) AppendConversationActivityStreamedTextNonempty(ctx context.Context, arg AppendConversationActivityStreamedTextNonemptyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, appendConversationActivityStreamedTextNonempty,
+		arg.Delta,
+		arg.MaxTextChars,
+		arg.UpdatedAt,
+		arg.ConversationID,
+		arg.ProviderItemID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const appendConversationMessageDelta = `-- name: AppendConversationMessageDelta :exec
 UPDATE conversation_messages
 SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE text || ? END, revision = revision + 1, streaming = 1, updated_at = ?
@@ -313,6 +391,31 @@ type AppendConversationMessageDeltaParams struct {
 // because AO does not know the message id the provider will use.
 func (q *Queries) AppendConversationMessageDelta(ctx context.Context, arg AppendConversationMessageDeltaParams) error {
 	_, err := q.db.ExecContext(ctx, appendConversationMessageDelta,
+		arg.Text,
+		arg.UpdatedAt,
+		arg.ConversationID,
+		arg.ProviderItemID,
+	)
+	return err
+}
+
+const appendConversationMessageDeltaNonempty = `-- name: AppendConversationMessageDeltaNonempty :exec
+UPDATE conversation_messages
+SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE text || ? END, revision = revision + 1, streaming = 1, updated_at = ?
+WHERE conversation_messages.conversation_id = ? AND provider_item_id <> '' AND provider_item_id = ?
+`
+
+type AppendConversationMessageDeltaNonemptyParams struct {
+	Text           string
+	UpdatedAt      time.Time
+	ConversationID string
+	ProviderItemID string
+}
+
+// Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+// the original query above, including matching more than one legacy row.
+func (q *Queries) AppendConversationMessageDeltaNonempty(ctx context.Context, arg AppendConversationMessageDeltaNonemptyParams) error {
+	_, err := q.db.ExecContext(ctx, appendConversationMessageDeltaNonempty,
 		arg.Text,
 		arg.UpdatedAt,
 		arg.ConversationID,
@@ -572,6 +675,30 @@ type ConversationActivityExistsForProviderItemParams struct {
 // where output arrives before item/started creates the activity.
 func (q *Queries) ConversationActivityExistsForProviderItem(ctx context.Context, arg ConversationActivityExistsForProviderItemParams) (bool, error) {
 	row := q.db.QueryRowContext(ctx, conversationActivityExistsForProviderItem, arg.ConversationID, arg.ProviderItemID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const conversationActivityExistsForProviderItemNonempty = `-- name: ConversationActivityExistsForProviderItemNonempty :one
+SELECT EXISTS(
+    SELECT 1
+    FROM conversation_activities
+    WHERE conversation_id = ?1
+      AND provider_item_id <> '' AND provider_item_id = ?2
+      AND status <> 'cancelled'
+)
+`
+
+type ConversationActivityExistsForProviderItemNonemptyParams struct {
+	ConversationID string
+	ProviderItemID string
+}
+
+// Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+// the original query above, including matching more than one legacy row.
+func (q *Queries) ConversationActivityExistsForProviderItemNonempty(ctx context.Context, arg ConversationActivityExistsForProviderItemNonemptyParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, conversationActivityExistsForProviderItemNonempty, arg.ConversationID, arg.ProviderItemID)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
@@ -2461,6 +2588,7 @@ SELECT CAST(COALESCE(MAX(sequence), 0) AS INTEGER) AS sequence
 FROM conversation_activities
 WHERE conversation_id = ?
   AND kind = 'system'
+  AND provider_item_id <> ''
   AND provider_item_id = ?
 `
 
@@ -2727,6 +2855,46 @@ type SelectConversationMessageByProviderItemParams struct {
 
 func (q *Queries) SelectConversationMessageByProviderItem(ctx context.Context, arg SelectConversationMessageByProviderItemParams) (ConversationMessage, error) {
 	row := q.db.QueryRowContext(ctx, selectConversationMessageByProviderItem, arg.ConversationID, arg.ProviderItemID)
+	var i ConversationMessage
+	err := row.Scan(
+		&i.ID,
+		&i.ConversationID,
+		&i.TurnID,
+		&i.Sequence,
+		&i.Revision,
+		&i.Role,
+		&i.Origin,
+		&i.Text,
+		&i.Streaming,
+		&i.ProviderItemID,
+		&i.ClientMessageID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeliveryContentJson,
+		&i.BranchID,
+		&i.ClientPayloadHash,
+		&i.SenderSessionID,
+		&i.SenderProjectID,
+		&i.SenderDisplayName,
+	)
+	return i, err
+}
+
+const selectConversationMessageByProviderItemNonempty = `-- name: SelectConversationMessageByProviderItemNonempty :one
+SELECT id, conversation_id, turn_id, sequence, revision, role, origin, text, streaming, provider_item_id, client_message_id, created_at, updated_at, delivery_content_json, branch_id, client_payload_hash, sender_session_id, sender_project_id, sender_display_name FROM conversation_messages
+WHERE conversation_id = ? AND provider_item_id <> '' AND provider_item_id = ?
+LIMIT 1
+`
+
+type SelectConversationMessageByProviderItemNonemptyParams struct {
+	ConversationID string
+	ProviderItemID string
+}
+
+// Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+// the original query above, including matching more than one legacy row.
+func (q *Queries) SelectConversationMessageByProviderItemNonempty(ctx context.Context, arg SelectConversationMessageByProviderItemNonemptyParams) (ConversationMessage, error) {
+	row := q.db.QueryRowContext(ctx, selectConversationMessageByProviderItemNonempty, arg.ConversationID, arg.ProviderItemID)
 	var i ConversationMessage
 	err := row.Scan(
 		&i.ID,
@@ -4071,6 +4239,31 @@ type SettleConversationMessageParams struct {
 
 func (q *Queries) SettleConversationMessage(ctx context.Context, arg SettleConversationMessageParams) error {
 	_, err := q.db.ExecContext(ctx, settleConversationMessage,
+		arg.Text,
+		arg.UpdatedAt,
+		arg.ConversationID,
+		arg.ProviderItemID,
+	)
+	return err
+}
+
+const settleConversationMessageNonempty = `-- name: SettleConversationMessageNonempty :exec
+UPDATE conversation_messages
+SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE ? END, revision = revision + 1, streaming = 0, updated_at = ?
+WHERE conversation_messages.conversation_id = ? AND provider_item_id <> '' AND provider_item_id = ?
+`
+
+type SettleConversationMessageNonemptyParams struct {
+	Text           string
+	UpdatedAt      time.Time
+	ConversationID string
+	ProviderItemID string
+}
+
+// Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+// the original query above, including matching more than one legacy row.
+func (q *Queries) SettleConversationMessageNonempty(ctx context.Context, arg SettleConversationMessageNonemptyParams) error {
+	_, err := q.db.ExecContext(ctx, settleConversationMessageNonempty,
 		arg.Text,
 		arg.UpdatedAt,
 		arg.ConversationID,
