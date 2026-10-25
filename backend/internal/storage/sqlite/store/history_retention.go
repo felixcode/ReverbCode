@@ -33,6 +33,7 @@ func EnsureHistoryRetentionSchema(db *sql.DB) error {
  expectedPK:=0;if i<2 {expectedPK=i+1}; expectedType:="TEXT";if i==5 {expectedType="INTEGER"}
  if i>=len(want)||name!=want[i]||typ!=expectedType||nn!=1||pk!=expectedPK {rows.Close();return fmt.Errorf("incompatible history retention schema column %d",i)};i++ }
  err=rows.Err();rows.Close();if err!=nil{return err};if i!=len(want){return errors.New("incomplete history retention schema")}
+ if _,err=tx.Exec(`CREATE INDEX IF NOT EXISTS ao_history_retention_conversation ON ao_history_retention(conversation_id)`);err!=nil{return err}
  return tx.Commit()
 }
 
@@ -44,7 +45,7 @@ func (s *Store) applyHistoryRetention(ctx context.Context, db gen.DBTX, conversa
  if err!=nil {return err};defer rows.Close()
  type marker struct{semantic,prompt string};markers:=map[string]marker{}
  for rows.Next(){var kind,id string;var m marker;if err=rows.Scan(&kind,&id,&m.semantic,&m.prompt);err!=nil{return err};markers[kind+"\x00"+id]=m};if err=rows.Err();err!=nil{return err}
- for i:=range snapshot.Messages {m:=&snapshot.Messages[i];if r,ok:=markers["message\x00"+m.ID];ok {m.ContentExpired=true;m.RetentionSemanticSHA256=r.semantic;m.RetentionPromptSHA256=r.prompt}}
+ for i:=range snapshot.Messages {m:=&snapshot.Messages[i];if r,ok:=markers["message\x00"+m.ID];ok {m.ContentExpired=true;m.RetentionSemanticSHA256=r.semantic;m.RetentionPromptSHA256=r.prompt};_,m.RetentionCoordination=markers["message_coordination\x00"+m.ID]}
  for i:=range snapshot.Activities {a:=&snapshot.Activities[i];if r,ok:=markers["activity\x00"+a.ID];ok {a.ContentExpired=true;a.RetentionSemanticSHA256=r.semantic}}
  for i:=range snapshot.Turns {t:=&snapshot.Turns[i];if _,ok:=markers["turn\x00"+t.ID];ok {t.ContentExpired=true}}
  return nil

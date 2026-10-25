@@ -859,6 +859,7 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 			AgentSessionIDLaunchID:           row.AgentSessionIDLaunchID,
 			NativeIdentityObservedAt:         nullTimeToTime(row.NativeIdentityObservedAt),
 			Prompt:                           row.Prompt,
+ PromptExpired: row.PromptExpired,
 			LatestUserPrompt:                 row.LatestUserPrompt,
 			LatestUserPromptAt:               nullTimeToTime(row.LatestUserPromptAt),
 			LatestInteractionAt:              nullTimeToTime(row.LatestInteractionAt),

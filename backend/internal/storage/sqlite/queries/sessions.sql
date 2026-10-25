@@ -226,7 +226,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions WHERE id = ?;
 
 -- name: GetSessionByAutomationRunID :one
@@ -245,7 +246,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions WHERE automation_run_id = ?;
 
 -- name: ListSessionsByProject :many
@@ -264,7 +266,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions WHERE project_id IS ? ORDER BY num;
 
 -- name: ListAllSessions :many
@@ -283,7 +286,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions ORDER BY project_id, num;
 
 -- name: ListChatHibernationCandidates :many

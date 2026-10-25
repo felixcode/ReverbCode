@@ -549,7 +549,7 @@ func (p *nativeHistoryCheckpoint) captureAOHighWater(
 		}
 		turn := turnsByID[message.TurnID]
 		if turn == nil || turn.RolledBackAt != nil || turn.HandledBySessionID != sessionID || message.Role != domain.MessageRoleUser ||
-			!nativeHistoryCoordinationMessage(message.Text) {
+			!(message.RetentionCoordination || nativeHistoryCoordinationMessage(message.Text)) {
 			continue
 		}
 		if providerBoundary == nil || message.Sequence > providerBoundarySequence {
@@ -1085,7 +1085,7 @@ func indexNativeHistoryTurns(
  candidate.messages[nativeHistoryMessageFingerprint(message.Role, message.Text)]++
  }
 		rememberProviderItem(message.ProviderItemID, candidate)
-		if message.Role == domain.MessageRoleUser && candidate.text == "" {
+		if message.Role == domain.MessageRoleUser && candidate.text == "" && candidate.promptSHA == "" {
 			if message.ContentExpired { candidate.promptSHA = message.RetentionPromptSHA256 } else { candidate.text = message.Text }
 			candidate.clientMessage = message.ClientMessageID
 			candidate.providerItem = message.ProviderItemID

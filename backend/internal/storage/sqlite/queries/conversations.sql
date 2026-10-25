@@ -612,7 +612,7 @@ SET status = 'completed',
     detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE sqlc.arg(detail_json) END,
     revision = revision + 1,
     updated_at = sqlc.arg(updated_at)
-WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
+WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
   AND turn_id = sqlc.arg(turn_id)
   AND kind = 'plan';
 
@@ -658,7 +658,7 @@ UPDATE conversation_turns
 SET state = 'failed',
     error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE 'controller ended before the turn completed' END,
     completed_at = sqlc.arg(completed_at)
-WHERE conversation_turns.conversation_id = sqlc.arg(conversation_id)
+WHERE conversation_turns.conversation_id = sqlc.arg(conversation_turns.conversation_id)
   AND conversation_turns.handled_by_review_id = sqlc.arg(review_id)
   AND conversation_turns.state IN ('queued', 'running');
 
@@ -706,7 +706,7 @@ ORDER BY conversation_turns.requested_at, conversation_turns.rowid;
 -- name: UpdateConversationTurnDiff :execrows
 UPDATE conversation_turns
 SET diff_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.diff_json ELSE ? END
-WHERE conversation_id = ? AND provider_turn_id = ?;
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ?;
 
 -- Overwrite the turn's plan. The provider re-sends the whole plan on every change,
 -- so the latest payload is the complete answer and there is nothing to merge.
@@ -718,7 +718,7 @@ WHERE conversation_id = ? AND provider_turn_id = ?;
 -- name: UpdateConversationTurnPlan :execrows
 UPDATE conversation_turns
 SET plan_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.plan_json ELSE ? END
-WHERE conversation_id = ? AND provider_turn_id = ?;
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ?;
 
 -- name: SelectConversationTurnByID :one
 SELECT * FROM conversation_turns WHERE id = ? LIMIT 1;
@@ -1056,12 +1056,12 @@ INSERT INTO conversation_messages (
 -- name: AppendConversationMessageDelta :exec
 UPDATE conversation_messages
 SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE text || ? END, revision = revision + 1, streaming = 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ?;
+WHERE conversation_messages.conversation_id = ? AND provider_item_id = ?;
 
 -- name: SettleConversationMessage :exec
 UPDATE conversation_messages
 SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE ? END, revision = revision + 1, streaming = 0, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ?;
+WHERE conversation_messages.conversation_id = ? AND provider_item_id = ?;
 
 -- name: SelectConversationMessageByProviderItem :one
 SELECT * FROM conversation_messages
@@ -1173,7 +1173,7 @@ INSERT INTO conversation_activities (
 -- every activity in the conversation for each settlement.
 UPDATE conversation_activities
 SET status = ?, summary = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.summary ELSE ? END, detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE ? END, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled';
+WHERE conversation_activities.conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled';
 
 -- Resolving an approval matches on the provider's request id, so a card the user
 -- left on screen cannot answer a request that replaced it.
@@ -1185,7 +1185,7 @@ SET status = 'resolved',
     detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE json_patch(detail_json, CAST(sqlc.arg(detail_json) AS TEXT)) END,
     revision = revision + 1,
     updated_at = sqlc.arg(updated_at)
-WHERE conversation_id = sqlc.arg(conversation_id)
+WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
   AND request_id = sqlc.arg(request_id)
   AND status = 'pending';
 
@@ -1270,7 +1270,7 @@ SET command_output = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (
     END,
     revision = revision + 1,
     updated_at = sqlc.arg(updated_at)
-WHERE conversation_id = sqlc.arg(conversation_id)
+WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
   AND provider_item_id = sqlc.arg(provider_item_id)
   AND status <> 'cancelled'
   AND command_output_truncated = 0;
@@ -1299,7 +1299,7 @@ SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (o
     END,
     revision = revision + 1,
     updated_at = sqlc.arg(updated_at)
-WHERE conversation_id = sqlc.arg(conversation_id)
+WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
   AND provider_item_id = sqlc.arg(provider_item_id)
   AND status <> 'cancelled'
   AND streamed_text_truncated = 0;
@@ -1338,7 +1338,7 @@ SELECT EXISTS(
 -- name: SettleConversationActivityStreamedText :execrows
 UPDATE conversation_activities
 SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE ? END, streamed_text_truncated = 0, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled';
+WHERE conversation_activities.conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled';
 
 -- name: SelectConversationActivityByProviderItem :one
 -- This lookup shares the nonempty provider-item contract and partial index with
@@ -1727,7 +1727,7 @@ WHERE e.branch_id = sqlc.arg(branch_id)
 UPDATE conversation_turns
 SET state = 'running', error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE '' END, completed_at = NULL,
     controller_generation = sqlc.arg(generation)
-WHERE id = sqlc.arg(turn_id) AND conversation_id = sqlc.arg(conversation_id)
+WHERE id = sqlc.arg(turn_id) AND conversation_turns.conversation_id = sqlc.arg(conversation_turns.conversation_id)
   AND branch_id = sqlc.arg(branch_id)
   AND state = 'failed' AND rolled_back_at IS NULL
   AND error_message = 'controller ended before the turn completed';

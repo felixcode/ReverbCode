@@ -627,6 +627,7 @@ type RetryPrompt struct {
 
 // ConversationMessage is one readable block of text.
 type ConversationMessage struct {
+ RetentionCoordination bool `json:"-"`
 	ContentExpired bool `json:"contentExpired,omitempty"`
 	RetentionSemanticSHA256 string `json:"-"`
 	RetentionPromptSHA256 string `json:"-"`
