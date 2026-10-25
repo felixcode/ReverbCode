@@ -122,17 +122,18 @@ func TestRetentionStoreKeepsStubsAndArchiveAfterLateEvents(t *testing.T) {
 	}
 	called := false
 	payload := `{"providerTurnId":"native","providerItemId":"changed-native-id","delta":"PRIVATE-OLD-BODY","text":"PRIVATE-OLD-BODY","summary":"PRIVATE-OLD-BODY","detail":{"body":"PRIVATE-OLD-BODY"},"diff":{"body":"PRIVATE-OLD-BODY"},"input":{"body":"PRIVATE-OLD-BODY"},"plan":{"body":"PRIVATE-OLD-BODY"},"error":null,"turnState":"completed","unknownFact":3}`
-	if _, err = s.ProjectProviderEvent(ctx, conv.ID, session.ID, "generation", "late", "message/completed", payload, time.Now(), func(context.Context) error { called = true; return nil }); err != nil {
-		t.Fatal(err)
-	}
+	if projected, eventErr := s.ProjectProviderEvent(ctx, conv.ID, session.ID, "generation", "late", "message/completed", payload, time.Now(), func(context.Context) error { called = true; return nil }); eventErr != nil || projected {
+ t.Fatalf("expired late body projected: %v %v",projected,eventErr)
+ }
 	if called {
 		t.Fatal("late expired projection ran")
 	}
-	events, err := s.ProviderEventsSince(ctx, conv.ID, 0, 100)
+	if projected,e:=s.ProjectProviderEvent(ctx,conv.ID,session.ID,"generation","late-item","message/delta",`{"providerItemId":"answer","delta":"PRIVATE-OLD-BODY","error":null}`,time.Now(),func(context.Context)error{called=true;return nil});e!=nil||projected{t.Fatalf("late item body projected: %v %v",projected,e)}
+ events, err := s.ProviderEventsSince(ctx, conv.ID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || strings.Contains(events[0].PayloadJson, "PRIVATE-OLD-BODY") {
+	if len(events) != 2 || strings.Contains(events[0].PayloadJson+events[1].PayloadJson, "PRIVATE-OLD-BODY") {
 		t.Fatalf("archive rehydrated prose: %#v", events)
 	}
 	var archived map[string]any

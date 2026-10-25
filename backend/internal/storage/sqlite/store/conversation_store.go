@@ -2863,7 +2863,7 @@ func projectProviderEventTx(
 	if inserted == 0 {
 		return false, nil
 	}
-	if expiredPayload { return true,nil }
+	if expiredPayload { return false,nil }
  txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
  txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
 	if err := project(txCtx); err != nil {
