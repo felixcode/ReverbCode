@@ -516,7 +516,10 @@ WITH wanted_session AS (
            ROW_NUMBER() OVER (
                PARTITION BY review_run.session_id, review_run.pr_url, review_run.target_sha, review_run.harness
                ORDER BY review_run.created_at DESC, review_run.id DESC
-           ) AS same_head_rank
+           ) AS same_head_rank,
+           MAX(review_run.created_at) OVER (
+               PARTITION BY review_run.session_id, review_run.pr_url, review_run.target_sha, review_run.harness
+           ) AS latest_created_at
     FROM review_run
     JOIN pr ON pr.url = review_run.pr_url
     WHERE pr.head_sha != ''
@@ -528,6 +531,7 @@ SELECT ranked_run.session_id, ranked_run.id, ranked_run.harness, ranked_run.pr_u
 FROM ranked_run
 JOIN wanted_session ON wanted_session.session_id = ranked_run.session_id
 WHERE ranked_run.same_head_rank = 1
+   OR (ranked_run.id IS NULL AND ranked_run.created_at = ranked_run.latest_created_at)
 `
 
 type ListCurrentHeadReviewRunsBySessionsRow struct {
@@ -543,6 +547,8 @@ type ListCurrentHeadReviewRunsBySessionsRow struct {
 // Rank the requested current-head runs once; a per-row NOT EXISTS would scan
 // unindexed terminal review history again for every candidate. Join wanted last
 // to preserve the input session multiplicity of the original batch query.
+// A nullable TEXT primary-key id cannot win the old newer.id comparison. Keep
+// all latest-time NULL ids so malformed rows still surface the original read error.
 func (q *Queries) ListCurrentHeadReviewRunsBySessions(ctx context.Context, jsonEach interface{}) ([]ListCurrentHeadReviewRunsBySessionsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listCurrentHeadReviewRunsBySessions, jsonEach)
 	if err != nil {
