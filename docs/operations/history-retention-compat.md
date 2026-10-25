@@ -64,3 +64,15 @@ The two latest native checkpoint text fields remain a documented small exception
 prefix/suffix comparison cannot be replaced by a single full-text SHA without
 changing the recovery protocol. Maintenance reports must disclose actual retained
 checkpoint bytes; no claim of zero retained old prose is made.
+
+Snapshot helpers share one transaction-bound query set, including branch and
+visibility queries. Lazy authentication reconciliation completes before the read
+snapshot is pinned. Retry/edit read their marker and source body in one read
+transaction. Marker lookups use only loaded page IDs and projection kinds, so
+unrelated raw-event audit markers do not inflate a small page.
+
+Old read-only import/restore sources without the optional sidecar remain
+unmodified. Their generated session readers substitute the fixed expiry expression
+with false; snapshot readers skip absent markers. This adapts each query, including
+transactional readers and fresh pool connections, without creating TEMP tables,
+changing the historical schema, or writing a read-only source.
