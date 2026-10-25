@@ -10988,6 +10988,8 @@ components:
           type: string
         projectId:
           type: string
+        promptExpired:
+          type: boolean
         providerLabel:
           type: string
         providerProfile:

@@ -344,7 +344,7 @@ type WorkspaceTreeEntry struct {
 // prs is a list. The embedded domain.Session.Metadata and domain.Session.PRs
 // fields are json:"-"; these curated fields are what serialize.
 type SessionView struct {
- PromptExpired bool `json:"promptExpired,omitempty"`
+	PromptExpired   bool   `json:"promptExpired,omitempty"`
 	ProviderProfile string `json:"providerProfile,omitempty"`
 	ProviderLabel   string `json:"providerLabel,omitempty"`
 	domain.Session

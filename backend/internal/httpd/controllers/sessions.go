@@ -2479,7 +2479,7 @@ func previewFileURL(r *http.Request, id domain.SessionID, entry string) (string,
 func sessionView(r *http.Request, s domain.Session) SessionView {
 	terminalGeneration := s.Metadata.RuntimeLaunchID
 	view := SessionView{
- PromptExpired:s.Metadata.PromptExpired,
+		PromptExpired:      s.Metadata.PromptExpired,
 		ProviderProfile:    s.ProviderProfile,
 		ProviderLabel:      s.ProviderLabel,
 		Session:            s,

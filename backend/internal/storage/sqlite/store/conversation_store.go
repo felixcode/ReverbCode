@@ -659,8 +659,13 @@ func (s *Store) ConversationEditAnchor(
 	ctx context.Context,
 	conversationID, replacedTurnID string,
 ) (domain.ConversationEditAnchor, error) {
- var expired bool
- if err:=s.readDB.QueryRowContext(ctx,`SELECT EXISTS(SELECT 1 FROM ao_history_retention r LEFT JOIN conversation_messages m ON r.object_kind='message' AND r.object_id=m.id WHERE r.conversation_id=? AND ((r.object_kind='turn' AND r.object_id=?) OR (m.turn_id=? AND m.role='user')))`,conversationID,replacedTurnID,replacedTurnID).Scan(&expired);err!=nil{return domain.ConversationEditAnchor{},err};if expired{return domain.ConversationEditAnchor{},domain.ErrHistoryContentExpired}
+	var expired bool
+	if err := s.readDB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ao_history_retention r LEFT JOIN conversation_messages m ON r.object_kind='message' AND r.object_id=m.id WHERE r.conversation_id=? AND ((r.object_kind='turn' AND r.object_id=?) OR (m.turn_id=? AND m.role='user')))`, conversationID, replacedTurnID, replacedTurnID).Scan(&expired); err != nil {
+		return domain.ConversationEditAnchor{}, err
+	}
+	if expired {
+		return domain.ConversationEditAnchor{}, domain.ErrHistoryContentExpired
+	}
 	row, err := s.qr.SelectConversationEditAnchor(ctx, gen.SelectConversationEditAnchorParams{
 		ConversationID: conversationID,
 		ReplacedTurnID: nullableString(replacedTurnID),
@@ -2863,9 +2868,11 @@ func projectProviderEventTx(
 	if inserted == 0 {
 		return false, nil
 	}
-	if expiredPayload { return false,nil }
- txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
- txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
+	if expiredPayload {
+		return false, nil
+	}
+	txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
+	txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
 	if err := project(txCtx); err != nil {
 		return false, fmt.Errorf("project provider event %s: %w", method, err)
 	}

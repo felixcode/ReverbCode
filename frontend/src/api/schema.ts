@@ -3703,6 +3703,7 @@ export interface components {
             previewRevision?: number;
             previewUrl?: string;
             projectId?: string;
+            promptExpired?: boolean;
             providerLabel?: string;
             providerProfile?: string;
             provisionError?: string;

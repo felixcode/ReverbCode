@@ -27,7 +27,7 @@ func TestRetentionStoreKeepsStubsAndArchiveAfterLateEvents(t *testing.T) {
 	seedProject(t, s, "retention")
 	rec := sampleRecord("retention")
 	rec.Mode = domain.SessionModeChat
- rec.Metadata.Prompt="ORIGINAL-SENTINEL"
+	rec.Metadata.Prompt = "ORIGINAL-SENTINEL"
 	session, err := s.CreateSession(ctx, rec)
 	if err != nil {
 		t.Fatal(err)
@@ -52,11 +52,17 @@ func TestRetentionStoreKeepsStubsAndArchiveAfterLateEvents(t *testing.T) {
 	if err = s.SettleTurnByID(ctx, "turn", domain.TurnStateFailed, "old error", histClock); err != nil {
 		t.Fatal(err)
 	}
-	activity:=domain.ConversationActivity{ID:"activity",ProviderItemID:"tool",Kind:domain.ActivityKindCommand,Status:domain.ActivityStatusCompleted,Summary:"ORIGINAL-SENTINEL",Detail:[]byte(`{"body":"ORIGINAL-SENTINEL"}`)}
- if err=s.UpsertActivity(ctx,conv.ID,"native",activity,histClock);err!=nil{t.Fatal(err)}
- if _,err=s.SetTurnPlan(ctx,conv.ID,"native",domain.ConversationPlan{Explanation:"ORIGINAL-SENTINEL"});err!=nil{t.Fatal(err)}
- if _,err=s.SetTurnDiff(ctx,conv.ID,"native",domain.ConversationTurnDiff{Files:[]domain.ConversationDiffFile{{Path:"ORIGINAL-SENTINEL"}}},histClock);err!=nil{t.Fatal(err)}
- db, err := sql.Open("sqlite", filepath.Join(dir, "ao.db"))
+	activity := domain.ConversationActivity{ID: "activity", ProviderItemID: "tool", Kind: domain.ActivityKindCommand, Status: domain.ActivityStatusCompleted, Summary: "ORIGINAL-SENTINEL", Detail: []byte(`{"body":"ORIGINAL-SENTINEL"}`)}
+	if err = s.UpsertActivity(ctx, conv.ID, "native", activity, histClock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.SetTurnPlan(ctx, conv.ID, "native", domain.ConversationPlan{Explanation: "ORIGINAL-SENTINEL"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.SetTurnDiff(ctx, conv.ID, "native", domain.ConversationTurnDiff{Files: []domain.ConversationDiffFile{{Path: "ORIGINAL-SENTINEL"}}}, histClock); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "ao.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,11 +91,19 @@ func TestRetentionStoreKeepsStubsAndArchiveAfterLateEvents(t *testing.T) {
 	if _, err = tx.Exec(`INSERT INTO ao_history_retention VALUES('turn','turn',?,'','',8,?,'2026-10-25','2026-10-23','["error_message"]')`, conv.ID, retentionHash("dummy")); err != nil {
 		t.Fatal(err)
 	}
-	if _,err=tx.Exec(`UPDATE conversation_activities SET summary='[AO history expired]',detail_json='{"_ao_history_expired":true}',command_output='',streamed_text='' WHERE id='activity'`);err!=nil{t.Fatal(err)}
- if _,err=tx.Exec(`INSERT INTO ao_history_retention VALUES('activity','activity',?,?, '',8,?,'2026-10-25','2026-10-23','["summary"]')`,conv.ID,retentionHash("command\x00completed\x00ORIGINAL-SENTINEL\x00"+string(activity.Detail)),retentionHash("dummy"));err!=nil{t.Fatal(err)}
- if _,err=tx.Exec(`UPDATE sessions SET prompt='[AO history expired]' WHERE id=?`,session.ID);err!=nil{t.Fatal(err)}
- if _,err=tx.Exec(`INSERT INTO ao_history_retention VALUES('session',?,?,'','',8,?,'2026-10-25','2026-10-23','["prompt"]')`,session.ID,conv.ID,retentionHash("dummy"));err!=nil{t.Fatal(err)}
- if err = tx.Commit(); err != nil {
+	if _, err = tx.Exec(`UPDATE conversation_activities SET summary='[AO history expired]',detail_json='{"_ao_history_expired":true}',command_output='',streamed_text='' WHERE id='activity'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(`INSERT INTO ao_history_retention VALUES('activity','activity',?,?, '',8,?,'2026-10-25','2026-10-23','["summary"]')`, conv.ID, retentionHash("command\x00completed\x00ORIGINAL-SENTINEL\x00"+string(activity.Detail)), retentionHash("dummy")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(`UPDATE sessions SET prompt='[AO history expired]' WHERE id=?`, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(`INSERT INTO ao_history_retention VALUES('session',?,?,'','',8,?,'2026-10-25','2026-10-23','["prompt"]')`, session.ID, conv.ID, retentionHash("dummy")); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.AppendAssistantDelta(ctx, conv.ID, "answer", "native", "SHOULD-NOT-RETURN", "ignored", histClock); err != nil {
@@ -98,21 +112,46 @@ func TestRetentionStoreKeepsStubsAndArchiveAfterLateEvents(t *testing.T) {
 	if err = s.SettleAssistantMessage(ctx, conv.ID, "answer", "native", "RESURRECTED", "ignored", histClock); err != nil {
 		t.Fatal(err)
 	}
-	activity.Summary="RESURRECTED-SENTINEL";activity.Detail=[]byte(`{"body":"RESURRECTED-SENTINEL"}`)
- if err=s.UpsertActivity(ctx,conv.ID,"native",activity,histClock);err!=nil{t.Fatal(err)}
- if _,err=s.AppendCommandOutput(ctx,conv.ID,"tool","RESURRECTED-SENTINEL",histClock);err!=nil{t.Fatal(err)}
- if _,err=s.AppendActivityStreamedText(ctx,conv.ID,"tool","RESURRECTED-SENTINEL",histClock);err!=nil{t.Fatal(err)}
- if _,err=s.SetTurnPlan(ctx,conv.ID,"native",domain.ConversationPlan{Explanation:"RESURRECTED-SENTINEL"});err!=nil{t.Fatal(err)}
- if _,err=s.SetTurnDiff(ctx,conv.ID,"native",domain.ConversationTurnDiff{Files:[]domain.ConversationDiffFile{{Path:"RESURRECTED-SENTINEL"}}},histClock);err!=nil{t.Fatal(err)}
- current,found,e:=s.GetSession(ctx,session.ID);if e!=nil||!found||!current.Metadata.PromptExpired{t.Fatalf("session expiry absent: %v",e)};current.Metadata.Prompt="RESURRECTED-SENTINEL";if err=s.UpdateSession(ctx,current);err!=nil{t.Fatal(err)}
- current,_,err=s.GetSession(ctx,session.ID);if err!=nil||current.Metadata.Prompt!="[AO history expired]"{t.Fatal("session prompt rehydrated")}
- snapshot, err := s.LoadConversationSnapshot(ctx, conv.ID)
+	activity.Summary = "RESURRECTED-SENTINEL"
+	activity.Detail = []byte(`{"body":"RESURRECTED-SENTINEL"}`)
+	if err = s.UpsertActivity(ctx, conv.ID, "native", activity, histClock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.AppendCommandOutput(ctx, conv.ID, "tool", "RESURRECTED-SENTINEL", histClock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.AppendActivityStreamedText(ctx, conv.ID, "tool", "RESURRECTED-SENTINEL", histClock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.SetTurnPlan(ctx, conv.ID, "native", domain.ConversationPlan{Explanation: "RESURRECTED-SENTINEL"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.SetTurnDiff(ctx, conv.ID, "native", domain.ConversationTurnDiff{Files: []domain.ConversationDiffFile{{Path: "RESURRECTED-SENTINEL"}}}, histClock); err != nil {
+		t.Fatal(err)
+	}
+	current, found, e := s.GetSession(ctx, session.ID)
+	if e != nil || !found || !current.Metadata.PromptExpired {
+		t.Fatalf("session expiry absent: %v", e)
+	}
+	current.Metadata.Prompt = "RESURRECTED-SENTINEL"
+	if err = s.UpdateSession(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err = s.GetSession(ctx, session.ID)
+	if err != nil || current.Metadata.Prompt != "[AO history expired]" {
+		t.Fatal("session prompt rehydrated")
+	}
+	snapshot, err := s.LoadConversationSnapshot(ctx, conv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Activities)!=1||!snapshot.Activities[0].ContentExpired||snapshot.Activities[0].Summary!="[AO history expired]"||snapshot.Activities[0].CommandOutput!=""||snapshot.Activities[0].StreamedText!=""{t.Fatal("activity body rehydrated")}
- if len(snapshot.Turns)!=1||!snapshot.Turns[0].ContentExpired||snapshot.Turns[0].Diff!=nil||snapshot.Turns[0].Plan!=nil{t.Fatal("turn body rehydrated")}
- for _, m := range snapshot.Messages {
+	if len(snapshot.Activities) != 1 || !snapshot.Activities[0].ContentExpired || snapshot.Activities[0].Summary != "[AO history expired]" || snapshot.Activities[0].CommandOutput != "" || snapshot.Activities[0].StreamedText != "" {
+		t.Fatal("activity body rehydrated")
+	}
+	if len(snapshot.Turns) != 1 || !snapshot.Turns[0].ContentExpired || snapshot.Turns[0].Diff != nil || snapshot.Turns[0].Plan != nil {
+		t.Fatal("turn body rehydrated")
+	}
+	for _, m := range snapshot.Messages {
 		if !m.ContentExpired || m.Text != "[AO history expired]" || m.RetentionSemanticSHA256 == "" {
 			t.Fatalf("stub lost: %#v", m)
 		}
@@ -123,13 +162,15 @@ func TestRetentionStoreKeepsStubsAndArchiveAfterLateEvents(t *testing.T) {
 	called := false
 	payload := `{"providerTurnId":"native","providerItemId":"changed-native-id","delta":"PRIVATE-OLD-BODY","text":"PRIVATE-OLD-BODY","summary":"PRIVATE-OLD-BODY","detail":{"body":"PRIVATE-OLD-BODY"},"diff":{"body":"PRIVATE-OLD-BODY"},"input":{"body":"PRIVATE-OLD-BODY"},"plan":{"body":"PRIVATE-OLD-BODY"},"error":null,"turnState":"completed","unknownFact":3}`
 	if projected, eventErr := s.ProjectProviderEvent(ctx, conv.ID, session.ID, "generation", "late", "message/completed", payload, time.Now(), func(context.Context) error { called = true; return nil }); eventErr != nil || projected {
- t.Fatalf("expired late body projected: %v %v",projected,eventErr)
- }
+		t.Fatalf("expired late body projected: %v %v", projected, eventErr)
+	}
 	if called {
 		t.Fatal("late expired projection ran")
 	}
-	if projected,e:=s.ProjectProviderEvent(ctx,conv.ID,session.ID,"generation","late-item","message/delta",`{"providerItemId":"answer","delta":"PRIVATE-OLD-BODY","error":null}`,time.Now(),func(context.Context)error{called=true;return nil});e!=nil||projected{t.Fatalf("late item body projected: %v %v",projected,e)}
- events, err := s.ProviderEventsSince(ctx, conv.ID, 0, 100)
+	if projected, e := s.ProjectProviderEvent(ctx, conv.ID, session.ID, "generation", "late-item", "message/delta", `{"providerItemId":"answer","delta":"PRIVATE-OLD-BODY","error":null}`, time.Now(), func(context.Context) error { called = true; return nil }); e != nil || projected {
+		t.Fatalf("late item body projected: %v %v", projected, e)
+	}
+	events, err := s.ProviderEventsSince(ctx, conv.ID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

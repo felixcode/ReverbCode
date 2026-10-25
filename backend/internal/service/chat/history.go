@@ -221,7 +221,9 @@ func (s *Service) EditMessage(
 	forker, canFork := source.conv.(ports.ChatForker)
 	canReplay := supportsApproximateReplay(source.conv)
 	anchor, err := s.store.ConversationEditAnchor(ctx, source.conversation.ID, turnID)
- if errors.Is(err,domain.ErrHistoryContentExpired) {return reject(EditMessageResult{},fmt.Errorf("%w: %w",ErrEditTurnInvalid,err))}
+	if errors.Is(err, domain.ErrHistoryContentExpired) {
+		return reject(EditMessageResult{}, fmt.Errorf("%w: %w", ErrEditTurnInvalid, err))
+	}
 	if err != nil {
 		if !errors.Is(err, domain.ErrNoConversationTurn) {
 			return EditMessageResult{}, fmt.Errorf("%w: load edit anchor: %w", ErrEditDeliveryUncertain, err)
@@ -542,7 +544,9 @@ func buildApproximateReplayContext(rows []domain.ConversationMessage, floor, cut
 	}
 	messages := make([]replayMessage, 0, len(rows))
 	for _, message := range rows {
- if message.ContentExpired && message.Sequence>floor && message.Sequence<=cutoff {return "",false,domain.ErrHistoryContentExpired}
+		if message.ContentExpired && message.Sequence > floor && message.Sequence <= cutoff {
+			return "", false, domain.ErrHistoryContentExpired
+		}
 		if message.Sequence <= floor || message.Sequence > cutoff || message.Streaming || strings.TrimSpace(message.Text) == "" {
 			continue
 		}
