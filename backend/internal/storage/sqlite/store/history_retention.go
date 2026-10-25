@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
- "time"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
 )
@@ -84,19 +84,53 @@ func (s *Store) retentionDB(ctx context.Context) gen.DBTX {
 }
 
 func (s *Store) applyHistoryRetention(ctx context.Context, db gen.DBTX, conversationID string, snapshot *ConversationSnapshot) error {
- if s.historyRetentionAbsent{return nil}
- type marker struct{semantic,prompt string};markers:=map[string]marker{}
- groups:=map[string][]string{"message":{},"message_coordination":{},"activity":{},"turn":{}}
- for _,m:=range snapshot.Messages{groups["message"]=append(groups["message"],m.ID);groups["message_coordination"]=append(groups["message_coordination"],m.ID)}
- for _,a:=range snapshot.Activities{groups["activity"]=append(groups["activity"],a.ID)}
- for _,t:=range snapshot.Turns{groups["turn"]=append(groups["turn"],t.ID)}
- for kind,ids:=range groups{for start:=0;start<len(ids);start+=200{end:=start+200;if end>len(ids){end=len(ids)}
- args:=[]any{kind,conversationID};for _,id:=range ids[start:end]{args=append(args,id)}
- query:=`SELECT object_kind,object_id,semantic_sha256,prompt_sha256 FROM ao_history_retention WHERE object_kind=? AND conversation_id=? AND object_id IN (`+strings.TrimSuffix(strings.Repeat("?,",end-start),",")+`)`
- rows,err:=db.QueryContext(ctx,query,args...);if err!=nil{return err}
- for rows.Next(){var kind,id string;var m marker;if err=rows.Scan(&kind,&id,&m.semantic,&m.prompt);err!=nil{rows.Close();return err};markers[kind+"\x00"+id]=m}
- err=rows.Err();rows.Close();if err!=nil{return err}
- }}
+	if s.historyRetentionAbsent {
+		return nil
+	}
+	type marker struct{ semantic, prompt string }
+	markers := map[string]marker{}
+	groups := map[string][]string{"message": {}, "message_coordination": {}, "activity": {}, "turn": {}}
+	for _, m := range snapshot.Messages {
+		groups["message"] = append(groups["message"], m.ID)
+		groups["message_coordination"] = append(groups["message_coordination"], m.ID)
+	}
+	for _, a := range snapshot.Activities {
+		groups["activity"] = append(groups["activity"], a.ID)
+	}
+	for _, t := range snapshot.Turns {
+		groups["turn"] = append(groups["turn"], t.ID)
+	}
+	for kind, ids := range groups {
+		for start := 0; start < len(ids); start += 200 {
+			end := start + 200
+			if end > len(ids) {
+				end = len(ids)
+			}
+			args := []any{kind, conversationID}
+			for _, id := range ids[start:end] {
+				args = append(args, id)
+			}
+			query := `SELECT object_kind,object_id,semantic_sha256,prompt_sha256 FROM ao_history_retention WHERE object_kind=? AND conversation_id=? AND object_id IN (` + strings.TrimSuffix(strings.Repeat("?,", end-start), ",") + `)`
+			rows, err := db.QueryContext(ctx, query, args...)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var kind, id string
+				var m marker
+				if err = rows.Scan(&kind, &id, &m.semantic, &m.prompt); err != nil {
+					rows.Close()
+					return err
+				}
+				markers[kind+"\x00"+id] = m
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return err
+			}
+		}
+	}
 
 	for i := range snapshot.Messages {
 		m := &snapshot.Messages[i]
@@ -218,33 +252,73 @@ func (s *Store) HistoryRetentionCapability() map[string]any {
 // Legacy sources remain mode=ro. Adapt only this fixed generated SELECT
 // expression when the optional sidecar is absent; no source/TEMP schema writes.
 const sessionPromptExpiryExpression = "EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired"
-type legacyHistoryReader struct{gen.DBTX}
-func(r legacyHistoryReader)QueryContext(ctx context.Context,query string,args ...any)(*sql.Rows,error){return r.DBTX.QueryContext(ctx,strings.ReplaceAll(query,sessionPromptExpiryExpression,"0 AS prompt_expired"),args...)}
-func(r legacyHistoryReader)QueryRowContext(ctx context.Context,query string,args ...any)*sql.Row{return r.DBTX.QueryRowContext(ctx,strings.ReplaceAll(query,sessionPromptExpiryExpression,"0 AS prompt_expired"),args...)}
 
-func NewReadOnlyStore(writeDB,readDB *sql.DB)(*Store,error){
- var present bool
- if err:=readDB.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ao_history_retention')`).Scan(&present);err!=nil{return nil,err}
- s:=NewStore(writeDB,readDB);s.readOnly=true;s.historyRetentionAbsent=!present
- if !present{s.qr=gen.New(legacyHistoryReader{readDB})}
- return s,nil
-}
-func(s *Store)historyReadQueries(tx *sql.Tx)*gen.Queries{if s.historyRetentionAbsent{return gen.New(legacyHistoryReader{tx})};return s.qr.WithTx(tx)}
+type legacyHistoryReader struct{ gen.DBTX }
 
-func(s *Store)beginConversationSnapshot(ctx context.Context,conversationID string)(*sql.Tx,*gen.Queries,gen.Conversation,error){
- // Release the preliminary read before any lazy reconciliation writer is taken.
- conv,err:=s.qr.SelectConversationByID(ctx,conversationID)
- if errors.Is(err,sql.ErrNoRows){return nil,nil,conv,ErrConversationNotFound};if err!=nil{return nil,nil,conv,err}
- if !s.readOnly {if account:=conversationToDomain(conv).Account;account!=nil&&account.ReauthRequiredAt!=nil{if _,err=s.ReconcileConversationAuthentication(ctx,conversationID,"","",time.Now());err!=nil{return nil,nil,conv,err}}}
- tx,err:=s.readDB.BeginTx(ctx,&sql.TxOptions{ReadOnly:true});if err!=nil{return nil,nil,conv,err}
- q:=s.historyReadQueries(tx);conv,err=q.SelectConversationByID(ctx,conversationID)
- if err!=nil{tx.Rollback();if errors.Is(err,sql.ErrNoRows){err=ErrConversationNotFound};return nil,nil,conv,err}
- return tx,q,conv,nil
+func (r legacyHistoryReader) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return r.DBTX.QueryContext(ctx, strings.ReplaceAll(query, sessionPromptExpiryExpression, "0 AS prompt_expired"), args...)
 }
-func(s *Store)historyTurnExpired(ctx context.Context,db gen.DBTX,conversationID,turnID string)(bool,error){
- if s.historyRetentionAbsent{return false,nil}
- var expired bool
- err:=db.QueryRowContext(ctx,`SELECT EXISTS(SELECT 1 FROM ao_history_retention r WHERE r.object_kind='turn' AND r.object_id=? AND r.conversation_id=?
- UNION ALL SELECT 1 FROM conversation_messages m JOIN ao_history_retention r ON r.object_kind='message' AND r.object_id=m.id WHERE m.conversation_id=? AND m.turn_id=? AND m.role='user')`,turnID,conversationID,conversationID,turnID).Scan(&expired)
- return expired,err
+func (r legacyHistoryReader) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return r.DBTX.QueryRowContext(ctx, strings.ReplaceAll(query, sessionPromptExpiryExpression, "0 AS prompt_expired"), args...)
+}
+
+func NewReadOnlyStore(writeDB, readDB *sql.DB) (*Store, error) {
+	var present bool
+	if err := readDB.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ao_history_retention')`).Scan(&present); err != nil {
+		return nil, err
+	}
+	s := NewStore(writeDB, readDB)
+	s.readOnly = true
+	s.historyRetentionAbsent = !present
+	if !present {
+		s.qr = gen.New(legacyHistoryReader{readDB})
+	}
+	return s, nil
+}
+func (s *Store) historyReadQueries(tx *sql.Tx) *gen.Queries {
+	if s.historyRetentionAbsent {
+		return gen.New(legacyHistoryReader{tx})
+	}
+	return s.qr.WithTx(tx)
+}
+
+func (s *Store) beginConversationSnapshot(ctx context.Context, conversationID string) (*sql.Tx, *gen.Queries, gen.Conversation, error) {
+	// Release the preliminary read before any lazy reconciliation writer is taken.
+	conv, err := s.qr.SelectConversationByID(ctx, conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, conv, ErrConversationNotFound
+	}
+	if err != nil {
+		return nil, nil, conv, err
+	}
+	if !s.readOnly {
+		if account := conversationToDomain(conv).Account; account != nil && account.ReauthRequiredAt != nil {
+			if _, err = s.ReconcileConversationAuthentication(ctx, conversationID, "", "", time.Now()); err != nil {
+				return nil, nil, conv, err
+			}
+		}
+	}
+	tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, conv, err
+	}
+	q := s.historyReadQueries(tx)
+	conv, err = q.SelectConversationByID(ctx, conversationID)
+	if err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			err = ErrConversationNotFound
+		}
+		return nil, nil, conv, err
+	}
+	return tx, q, conv, nil
+}
+func (s *Store) historyTurnExpired(ctx context.Context, db gen.DBTX, conversationID, turnID string) (bool, error) {
+	if s.historyRetentionAbsent {
+		return false, nil
+	}
+	var expired bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ao_history_retention r WHERE r.object_kind='turn' AND r.object_id=? AND r.conversation_id=?
+ UNION ALL SELECT 1 FROM conversation_messages m JOIN ao_history_retention r ON r.object_kind='message' AND r.object_id=m.id WHERE m.conversation_id=? AND m.turn_id=? AND m.role='user')`, turnID, conversationID, conversationID, turnID).Scan(&expired)
+	return expired, err
 }

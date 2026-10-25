@@ -26,6 +26,7 @@ import (
 type retentionObservedDriver struct{afterMarker func();markerRows *atomic.Int64}
 func(d retentionObservedDriver)Open(name string)(driver.Conn,error){c,e:=(&sqliteDriver.Driver{}).Open(name);if e!=nil{return nil,e};return &retentionObservedConn{Conn:c,owner:d},nil}
 type retentionObservedConn struct{driver.Conn;owner retentionObservedDriver}
+func(c *retentionObservedConn)BeginTx(ctx context.Context,opts driver.TxOptions)(driver.Tx,error){return c.Conn.(driver.ConnBeginTx).BeginTx(ctx,opts)}
 func(c *retentionObservedConn)QueryContext(ctx context.Context,q string,args []driver.NamedValue)(driver.Rows,error){
  rows,e:=c.Conn.(driver.QueryerContext).QueryContext(ctx,q,args);if e!=nil{return nil,e}
  callback:=func(){}

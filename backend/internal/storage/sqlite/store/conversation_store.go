@@ -638,8 +638,10 @@ func (s *Store) ConversationBranch(
 
 // ConversationBranches lists every durable sibling and descendant in creation
 // order. Only the current head is marked active.
-func (s *Store) ConversationBranches(ctx context.Context,conversationID string)([]domain.ConversationBranch,error){return conversationBranches(ctx,s.qr,conversationID)}
-func conversationBranches(ctx context.Context,q *gen.Queries,conversationID string)([]domain.ConversationBranch,error){
+func (s *Store) ConversationBranches(ctx context.Context, conversationID string) ([]domain.ConversationBranch, error) {
+	return conversationBranches(ctx, s.qr, conversationID)
+}
+func conversationBranches(ctx context.Context, q *gen.Queries, conversationID string) ([]domain.ConversationBranch, error) {
 	rows, err := q.SelectConversationBranches(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("select conversation branches for %s: %w", conversationID, err)
@@ -657,9 +659,19 @@ func (s *Store) ConversationEditAnchor(
 	ctx context.Context,
 	conversationID, replacedTurnID string,
 ) (domain.ConversationEditAnchor, error) {
- tx,err:=s.readDB.BeginTx(ctx,&sql.TxOptions{ReadOnly:true});if err!=nil{return domain.ConversationEditAnchor{},err};defer tx.Rollback()
- q:=s.historyReadQueries(tx)
- expired,err:=s.historyTurnExpired(ctx,tx,conversationID,replacedTurnID);if err!=nil{return domain.ConversationEditAnchor{},err};if expired{return domain.ConversationEditAnchor{},domain.ErrHistoryContentExpired}
+	tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return domain.ConversationEditAnchor{}, err
+	}
+	defer tx.Rollback()
+	q := s.historyReadQueries(tx)
+	expired, err := s.historyTurnExpired(ctx, tx, conversationID, replacedTurnID)
+	if err != nil {
+		return domain.ConversationEditAnchor{}, err
+	}
+	if expired {
+		return domain.ConversationEditAnchor{}, domain.ErrHistoryContentExpired
+	}
 
 	row, err := q.SelectConversationEditAnchor(ctx, gen.SelectConversationEditAnchorParams{
 		ConversationID: conversationID,
@@ -3087,8 +3099,11 @@ func (s *Store) LoadConversationSnapshotPage(
 	beforeSequence int64,
 	limit int64,
 ) (ConversationSnapshot, error) {
- tx,q,conv,err:=s.beginConversationSnapshot(ctx,conversationID)
- if err!=nil{return ConversationSnapshot{},err};defer tx.Rollback()
+	tx, q, conv, err := s.beginConversationSnapshot(ctx, conversationID)
+	if err != nil {
+		return ConversationSnapshot{}, err
+	}
+	defer tx.Rollback()
 
 	if limit <= 0 {
 		limit = DefaultConversationPageSize
@@ -3099,11 +3114,11 @@ func (s *Store) LoadConversationSnapshotPage(
 	if beforeSequence <= 0 || beforeSequence > conv.LatestSequence+1 {
 		beforeSequence = conv.LatestSequence + 1
 	}
-	visibleAfterSequence, err := s.conversationVisibleAfterSequence(ctx, q,conv)
+	visibleAfterSequence, err := s.conversationVisibleAfterSequence(ctx, q, conv)
 	if err != nil {
 		return ConversationSnapshot{}, err
 	}
-	presentation := s.conversationHistoryPresentation(ctx, q,conversationID)
+	presentation := s.conversationHistoryPresentation(ctx, q, conversationID)
 	if beforeSequence <= visibleAfterSequence {
 		snapshot := ConversationSnapshot{
 			Conversation:                     conversationToDomain(conv),
@@ -3171,7 +3186,7 @@ func (s *Store) LoadConversationSnapshotPage(
 	if err != nil {
 		return ConversationSnapshot{}, fmt.Errorf("select turn page: %w", err)
 	}
-	retriedSources, err := s.conversationRetriedSources(ctx, q,conversationID)
+	retriedSources, err := s.conversationRetriedSources(ctx, q, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, err
 	}
@@ -3215,7 +3230,7 @@ func (s *Store) LoadConversationSnapshotPage(
 
 func (s *Store) conversationVisibleAfterSequence(
 	ctx context.Context,
- q *gen.Queries,
+	q *gen.Queries,
 	conv gen.Conversation,
 ) (int64, error) {
 	if conv.Scope != domain.ConversationScopeProject || conv.CurrentSessionID == nil || *conv.CurrentSessionID == "" {
@@ -3229,7 +3244,7 @@ func (s *Store) conversationVisibleAfterSequence(
 		return 0, fmt.Errorf("select context reset boundary for conversation %s: %w", conv.ID, err)
 	}
 	if sequence == 0 {
-		pending, pendingErr := s.projectConversationResetPending(ctx,q, conv)
+		pending, pendingErr := s.projectConversationResetPending(ctx, q, conv)
 		if pendingErr != nil {
 			return 0, pendingErr
 		}
@@ -3240,7 +3255,7 @@ func (s *Store) conversationVisibleAfterSequence(
 	return sequence, nil
 }
 
-func (s *Store) projectConversationResetPending(ctx context.Context,q *gen.Queries, conv gen.Conversation) (bool, error) {
+func (s *Store) projectConversationResetPending(ctx context.Context, q *gen.Queries, conv gen.Conversation) (bool, error) {
 	if conv.Scope != domain.ConversationScopeProject ||
 		conv.CurrentSessionID == nil ||
 		*conv.CurrentSessionID == "" ||
@@ -3283,14 +3298,17 @@ func (s *Store) LoadConversationSnapshot(
 	ctx context.Context,
 	conversationID string,
 ) (ConversationSnapshot, error) {
- tx,q,conv,err:=s.beginConversationSnapshot(ctx,conversationID)
- if err!=nil{return ConversationSnapshot{},err};defer tx.Rollback()
+	tx, q, conv, err := s.beginConversationSnapshot(ctx, conversationID)
+	if err != nil {
+		return ConversationSnapshot{}, err
+	}
+	defer tx.Rollback()
 
 	turnRows, err := q.SelectConversationTurns(ctx, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, fmt.Errorf("select turns: %w", err)
 	}
-	retriedSources, err := s.conversationRetriedSources(ctx,q, conversationID)
+	retriedSources, err := s.conversationRetriedSources(ctx, q, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, err
 	}
@@ -3306,7 +3324,7 @@ func (s *Store) LoadConversationSnapshot(
 		return ConversationSnapshot{}, fmt.Errorf("select activities: %w", err)
 	}
 
-	presentation := s.conversationHistoryPresentation(ctx,q, conversationID)
+	presentation := s.conversationHistoryPresentation(ctx, q, conversationID)
 	snapshot := ConversationSnapshot{
 		Conversation:                     conversationToDomain(conv),
 		ActiveBranch:                     presentation.activeBranch,
@@ -3333,7 +3351,7 @@ func (s *Store) LoadConversationSnapshot(
 	return snapshot, nil
 }
 
-func (s *Store) conversationRetriedSources(ctx context.Context,q *gen.Queries, conversationID string) (map[string]bool, error) {
+func (s *Store) conversationRetriedSources(ctx context.Context, q *gen.Queries, conversationID string) (map[string]bool, error) {
 	rows, err := q.SelectConversationRetriedSourceTurnIDs(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("select retried conversation sources: %w", err)
@@ -3374,10 +3392,10 @@ func (p conversationHistoryPresentation) filterInactiveProviderTurn(turn *domain
 // nodes, but unlike an edit branch they replace no human prompt.
 func (s *Store) conversationHistoryPresentation(
 	ctx context.Context,
- q *gen.Queries,
+	q *gen.Queries,
 	conversationID string,
 ) conversationHistoryPresentation {
-	branches, err := conversationBranches(ctx,q,conversationID)
+	branches, err := conversationBranches(ctx, q, conversationID)
 	if err != nil {
 		return conversationHistoryPresentation{}
 	}
@@ -3760,9 +3778,19 @@ func (s *Store) ProviderEventsSince(
 // re-dispatching it as a new turn. The content is loaded from AO's own rows
 // rather than from a client request that could be stale or substituted.
 func (s *Store) RetryPrompt(ctx context.Context, conversationID, turnID string) (domain.RetryPrompt, error) {
- tx,err:=s.readDB.BeginTx(ctx,&sql.TxOptions{ReadOnly:true});if err!=nil{return domain.RetryPrompt{},err};defer tx.Rollback()
- q:=s.historyReadQueries(tx)
- expired,err:=s.historyTurnExpired(ctx,tx,conversationID,turnID);if err!=nil{return domain.RetryPrompt{},err};if expired{return domain.RetryPrompt{},domain.ErrHistoryContentExpired}
+	tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return domain.RetryPrompt{}, err
+	}
+	defer tx.Rollback()
+	q := s.historyReadQueries(tx)
+	expired, err := s.historyTurnExpired(ctx, tx, conversationID, turnID)
+	if err != nil {
+		return domain.RetryPrompt{}, err
+	}
+	if expired {
+		return domain.RetryPrompt{}, domain.ErrHistoryContentExpired
+	}
 
 	row, err := q.SelectRetryableConversationPrompt(ctx, gen.SelectRetryableConversationPromptParams{
 		ID: turnID, ConversationID: conversationID,
