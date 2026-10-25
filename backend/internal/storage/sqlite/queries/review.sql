@@ -151,15 +151,20 @@ WHERE review_run.session_id = ?
 -- Rank the requested current-head runs once; a per-row NOT EXISTS would scan
 -- unindexed terminal review history again for every candidate. Join wanted last
 -- to preserve the input session multiplicity of the original batch query.
+-- A nullable TEXT primary-key id cannot win the old newer.id comparison. Keep
+-- all latest-time NULL ids so malformed rows still surface the original read error.
 WITH wanted_session AS (
     SELECT CAST(j.value AS TEXT) AS session_id
     FROM json_each(?) AS j
 ), ranked_run AS (
-    SELECT review_run.id,
+    SELECT review_run.rowid AS run_rowid,
            ROW_NUMBER() OVER (
                PARTITION BY review_run.session_id, review_run.pr_url, review_run.target_sha, review_run.harness
                ORDER BY review_run.created_at DESC, review_run.id DESC
-           ) AS same_head_rank
+           ) AS same_head_rank,
+           MAX(review_run.created_at) OVER (
+               PARTITION BY review_run.session_id, review_run.pr_url, review_run.target_sha, review_run.harness
+           ) AS latest_created_at
     FROM review_run
     JOIN pr ON pr.url = review_run.pr_url
     WHERE pr.head_sha != ''
@@ -169,9 +174,10 @@ WITH wanted_session AS (
 SELECT review_run.session_id, review_run.id, review_run.harness, review_run.pr_url,
        review_run.status, review_run.verdict, review_run.created_at
 FROM ranked_run
-JOIN review_run ON review_run.id = ranked_run.id
+JOIN review_run ON review_run.rowid = ranked_run.run_rowid
 JOIN wanted_session ON wanted_session.session_id = review_run.session_id
-WHERE ranked_run.same_head_rank = 1;
+WHERE ranked_run.same_head_rank = 1
+   OR (review_run.id IS NULL AND review_run.created_at = ranked_run.latest_created_at);
 
 -- name: FailUnsubmittedReviewBatchForChatTurn :exec
 UPDATE review_run SET status = 'failed', body = 'reviewer Chat turn ended without submitting a result'

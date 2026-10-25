@@ -151,12 +151,12 @@ func TestCurrentHeadReviewBatchMatchesOriginalLatestFactsWithoutCorrelatedScan(t
 		{"later-cancelled", "s4", "codex", "p1", "h1", "cancelled", "", 1},
 	}
 	for _, r := range fixtures {
-		if _, err = db.Exec("INSERT INTO review_run VALUES(?,?,?,?,?,?,?,?,?,?)", r.id, r.session, r.harness, r.pr, r.target, r.status, r.verdict, now.Add(time.Duration(r.second)*time.Second), "body must not be selected"); err != nil {
+		if _, err = db.Exec("INSERT INTO review_run VALUES(?,?,?,?,?,?,?,?,?)", r.id, r.session, r.harness, r.pr, r.target, r.status, r.verdict, now.Add(time.Duration(r.second)*time.Second), "body must not be selected"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := 0; i < 100; i++ {
-		if _, err = db.Exec("INSERT INTO review_run VALUES(?,?,?,?,?,?,?,?,?,?)", fmt.Sprintf("unrelated-%d", i), "unwanted", "codex", "p1", "h1", "completed", "approved", now, strings.Repeat("private synthetic body ", 100)); err != nil {
+		if _, err = db.Exec("INSERT INTO review_run VALUES(?,?,?,?,?,?,?,?,?)", fmt.Sprintf("unrelated-%d", i), "unwanted", "codex", "p1", "h1", "completed", "approved", now, strings.Repeat("private synthetic body ", 100)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -205,4 +205,29 @@ func TestCurrentHeadReviewBatchMatchesOriginalLatestFactsWithoutCorrelatedScan(t
 			}
 		})
 	}
+	// SQLite TEXT PRIMARY KEY permits NULL; the domain reader rejects it. The
+	// optimization must not hide a malformed latest row behind a valid tie.
+	if _, err = db.Exec("INSERT INTO review_run VALUES(NULL,?,?,?,?,?,?,?,?)", "s1", "codex", "p1", "h1", "completed", "approved", now.Add(time.Second), "malformed synthetic row"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = gen.New(db).ListCurrentHeadReviewRunsBySessions(context.Background(), `["s1"]`); err == nil {
+		t.Fatal("optimized read hid nullable ID anomaly")
+	}
+	rows, err := db.Query(previousCurrentHeadReviewBatchQuery, `["s1"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalFailed := false
+	for rows.Next() {
+		var r gen.ListCurrentHeadReviewRunsBySessionsRow
+		if e := rows.Scan(&r.SessionID, &r.ID, &r.Harness, &r.PRURL, &r.Status, &r.Verdict, &r.CreatedAt); e != nil {
+			originalFailed = true
+			break
+		}
+	}
+	rows.Close()
+	if !originalFailed {
+		t.Fatal("malformed fixture did not exercise original read error")
+	}
+
 }
