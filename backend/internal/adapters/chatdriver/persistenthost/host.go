@@ -127,6 +127,7 @@ type ACPState struct {
 
 // Transport is one authenticated attachment to a persistent provider host.
 type Transport struct {
+	DisconnectState  func() DisconnectState
 	Stdin            io.WriteCloser
 	Stdout           io.Reader
 	Reconnected      bool
@@ -485,6 +486,7 @@ func attach(ctx context.Context, d Descriptor, reconnected bool, dataDirs ...str
 	}
 	return &Transport{
 		RecoveryEvidence: recoveryEvidence,
+		DisconnectState:  captureDisconnectState(d, dataDirs),
 		Stdin:            conn, Stdout: reader, Reconnected: reconnected,
 		NextRequestID: response.NextRequestID, ACPState: response.ACPState,
 	}, nil

@@ -22,6 +22,7 @@ type process struct {
 	gate             *gatedReader
 	acpState         *persistenthost.ACPState
 	recoveryEvidence func(context.Context, int64) ([]string, error)
+	disconnectState  func() persistenthost.DisconnectState
 }
 
 type gatedReader struct {

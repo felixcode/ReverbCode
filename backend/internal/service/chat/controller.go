@@ -257,6 +257,11 @@ type Controller struct {
 	// the closing controller from projecting a false provider exit or failing work
 	// that the detached host continues to run.
 	preserveProviderOnStop bool
+	terminateRequested     bool
+	terminateOnce          sync.Once
+	terminationErr         error
+	terminateCleanupOnce   sync.Once
+	terminateCleanupErr    error
 
 	// account, threadState and mcpServers are merged here before being written,
 	// because the provider reports each of them in pieces: account/updated carries
@@ -2555,22 +2560,45 @@ func (c *Controller) Close(ctx context.Context) error {
 // host. Daemon shutdown uses Close so the host survives; user/session teardown
 // and controller replacement use Terminate.
 func (c *Controller) Terminate(ctx context.Context) error {
-	c.once.Do(func() {
+	c.mu.Lock()
+	c.terminateRequested = true
+	c.preserveProviderOnStop = false
+	c.mu.Unlock()
+	c.terminateOnce.Do(func() {
 		if terminator, ok := c.conv.(ports.ChatProviderTerminator); ok {
-			c.closeErr = terminator.Terminate()
+			c.terminationErr = terminator.Terminate()
 		} else {
-			c.closeErr = c.conv.Close()
+			c.once.Do(func() { c.closeErr = c.conv.Close() })
+			c.terminationErr = c.closeErr
 		}
 	})
 	select {
 	case <-c.stopped:
-		return c.closeErr
+		c.terminateCleanupOnce.Do(func() { c.terminateCleanupErr = c.cleanupOwnedControllerWork(ctx, c.now()) })
+		return errors.Join(c.terminationErr, c.terminateCleanupErr)
 	case <-ctx.Done():
-		if c.closeErr != nil {
-			return errors.Join(c.closeErr, ctx.Err())
-		}
-		return ctx.Err()
+		return errors.Join(c.terminationErr, ctx.Err())
 	}
+}
+
+// Adapter-only disconnect evidence cannot be supplied by replay/HTTP payloads.
+func (c *Controller) preserveDisconnectedWork() bool {
+	observer, ok := c.conv.(ports.ChatDisconnectObserver)
+	if !ok {
+		return false
+	}
+	state := observer.DisconnectedProviderState()
+	if state != ports.ChatDisconnectPreserved && state != ports.ChatDisconnectUnknown {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminateRequested || c.preserveProviderOnStop {
+		return false
+	}
+	c.preserveProviderOnStop = true
+	c.log.Warn("persistent transport disconnected; work retained", "session", c.sessionID, "provider_state", state)
+	return true
 }
 
 // closeForBranchHandoff retires and terminates a source controller without
@@ -2669,6 +2697,7 @@ func (c *Controller) project() {
 		}
 	}
 
+	disconnected := c.preserveDisconnectedWork()
 	c.mu.Lock()
 	c.state = ports.ChatControllerStopped
 	suppressStoppedActivity := c.suppressStoppedActivity
@@ -2678,6 +2707,9 @@ func (c *Controller) project() {
 	// Hibernate admitted no running work, but Send can append an optimistic
 	// message during shutdown. Keep that queue for the replacement controller.
 	if preserveProvider || hibernating {
+		if disconnected && !suppressStoppedActivity {
+			c.reportActivity(ctx, domain.ActivityExited, "chat.transport.disconnected", c.now())
+		}
 		return
 	}
 
@@ -3197,6 +3229,13 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 
 	case ports.ChatEventControllerState:
 		if event.ControllerState == ports.ChatControllerStopped {
+			c.preserveDisconnectedWork()
+			c.mu.Lock()
+			preserve := c.preserveProviderOnStop && !c.terminateRequested
+			c.mu.Unlock()
+			if preserve {
+				return nil
+			}
 			return c.cleanupOwnedControllerWork(ctx, now)
 		}
 		return nil
