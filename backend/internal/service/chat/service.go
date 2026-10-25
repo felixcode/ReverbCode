@@ -37,6 +37,7 @@ type SessionReader interface {
 // Service owns the live Chat controllers.
 type Service struct {
 	store                  Store
+	liveReader             LiveTurnReader
 	reader                 SnapshotReader
 	pageReader             SnapshotPageReader
 	sessions               SessionReader
@@ -107,6 +108,7 @@ func (g controllerGate) unlock() { <-g }
 type Options struct {
 	Store      Store
 	Reader     SnapshotReader
+	LiveReader LiveTurnReader
 	PageReader SnapshotPageReader
 	Sessions   SessionReader
 	Drivers    ports.ChatDriverRegistry
@@ -146,6 +148,7 @@ func New(opts Options) *Service {
 	return &Service{
 		store:                  opts.Store,
 		reader:                 opts.Reader,
+		liveReader:             opts.LiveReader,
 		pageReader:             opts.PageReader,
 		sessions:               opts.Sessions,
 		drivers:                opts.Drivers,
@@ -727,13 +730,17 @@ func (s *Service) Start(ctx context.Context, cfg StartConfig) (*Controller, erro
 			return nil, err
 		}
 	}
-	var liveRows ConversationRows
+	var liveTurns []domain.ConversationTurn
 	if liveReconnect {
-		if s.reader == nil {
+		liveReader := s.liveReader
+		if liveReader == nil {
+			liveReader, _ = s.store.(LiveTurnReader)
+		}
+		if liveReader == nil {
 			_ = cleanupUnpublishedConversation(conv, false)
 			return nil, fmt.Errorf("%w: durable conversation snapshot is unavailable", ports.ErrChatRecoveryInconclusive)
 		}
-		liveRows, err = s.reader.LoadConversationSnapshot(ctx, conversation.ID)
+		liveTurns, err = liveReader.LoadConversationLiveTurns(ctx, conversation.ID)
 		if err != nil {
 			_ = cleanupUnpublishedConversation(conv, false)
 			return nil, fmt.Errorf("%w: load live conversation before reconnect: %w", ports.ErrChatRecoveryInconclusive, err)
@@ -789,7 +796,7 @@ func (s *Service) Start(ctx context.Context, cfg StartConfig) (*Controller, erro
 		// A provider may have accepted a prompt before its ID could be bound.
 		// Its replayed events will be adopted separately; leave bound live work
 		// and queued intake intact while closing the unbound visible spinner.
-		for _, turn := range liveRows.Turns {
+		for _, turn := range liveTurns {
 			if turn.State != domain.TurnStateRunning || turn.ProviderTurnID != "" || turn.RolledBackAt != nil {
 				continue
 			}
@@ -833,7 +840,7 @@ func (s *Service) Start(ctx context.Context, cfg StartConfig) (*Controller, erro
 		cfg.SessionID, owner, conversation, generation, cfg.Harness, conv, s.store, s.activity, s.log, s.newID, s.now, s.onAccountChanged, s.onCodexCapacityChanged)
 	var commitProviderHistory func(context.Context) error
 	if liveReconnect {
-		providerTurnID := controller.restoreLiveTurnOwnership(liveRows.Turns)
+		providerTurnID := controller.restoreLiveTurnOwnership(liveTurns)
 		if providerTurnID == "" {
 			if evidenceReader, ok := conv.(ports.ChatLiveTurnRecoveryEvidenceReader); ok {
 				ids, evidenceErr := evidenceReader.ReadLiveTurnRecoveryEvidence(ctx)
@@ -1554,6 +1561,18 @@ type Snapshot struct {
 // independently.
 type SnapshotReader interface {
 	LoadConversationSnapshot(ctx context.Context, conversationID string) (ConversationRows, error)
+}
+
+// LiveTurnReader reads only durable control facts needed to adopt an existing host.
+// It deliberately excludes timeline bodies and native-history replay.
+type LiveTurnReader interface {
+	LoadConversationLiveTurns(ctx context.Context, conversationID string) ([]domain.ConversationTurn, error)
+}
+
+type LiveTurnReaderFunc func(context.Context, string) ([]domain.ConversationTurn, error)
+
+func (f LiveTurnReaderFunc) LoadConversationLiveTurns(ctx context.Context, id string) ([]domain.ConversationTurn, error) {
+	return f(ctx, id)
 }
 
 // SnapshotPageReader is the production bounded-history path. It is separate from

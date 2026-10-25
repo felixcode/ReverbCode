@@ -5322,6 +5322,12 @@ func TestServiceLiveReconnectKeepsDurableRunningTurnBusy(t *testing.T) {
 		}
 		return false
 	})
+	for i := 0; i < 88; i++ {
+		queued, queueErr := firstController.Send(context.Background(), ports.ChatUserMessage{Text: fmt.Sprintf("queued-before-restart-%d", i)})
+		if queueErr != nil || queued.State != domain.TurnStateQueued {
+			t.Fatalf("queue before restart: state=%s err=%v", queued.State, queueErr)
+		}
+	}
 	first.StopAll(context.Background())
 
 	before, found, err := st.GetSession(context.Background(), testSession)
@@ -5337,8 +5343,17 @@ func TestServiceLiveReconnectKeepsDurableRunningTurnBusy(t *testing.T) {
 	secondProvider := &liveReconnectedConversation{nativeHistoryConversation: &nativeHistoryConversation{
 		fakeConversation: newFakeConversation(),
 	}}
+	var liveReads atomic.Int32
 	second := chatsvc.New(chatsvc.Options{
-		Store: st, Reader: reader, Sessions: st,
+		Store: st, Sessions: st,
+		Reader: chatsvc.SnapshotReaderFunc(func(context.Context, string) (chatsvc.ConversationRows, error) {
+			t.Fatal("live adoption must not load timeline history")
+			return chatsvc.ConversationRows{}, nil
+		}),
+		LiveReader: chatsvc.LiveTurnReaderFunc(func(ctx context.Context, id string) ([]domain.ConversationTurn, error) {
+			liveReads.Add(1)
+			return st.LoadConversationLiveTurns(ctx, id)
+		}),
 		Drivers: fakeRegistry{driver: fakeDriver{conv: secondProvider}},
 		Log:     slog.New(slog.DiscardHandler), NewID: newID,
 	})
@@ -5361,6 +5376,22 @@ func TestServiceLiveReconnectKeepsDurableRunningTurnBusy(t *testing.T) {
 	after, _, err := st.GetSession(context.Background(), testSession)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if liveReads.Load() != 1 {
+		t.Fatalf("live-only reads = %d, want one", liveReads.Load())
+	}
+	preserved, err := st.LoadConversationSnapshot(context.Background(), secondController.ConversationID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedCount := 0
+	for _, item := range preserved.Turns {
+		if item.State == domain.TurnStateQueued {
+			queuedCount++
+		}
+	}
+	if queuedCount != 88 || len(secondProvider.sentTexts()) != 0 || secondProvider.reads.Load() != 0 {
+		t.Fatalf("live recovery changed queue/replayed prompt: queued=%d sent=%d history=%d", queuedCount, len(secondProvider.sentTexts()), secondProvider.reads.Load())
 	}
 	if after.Activity != before.Activity || !after.UpdatedAt.Equal(before.UpdatedAt) {
 		t.Fatalf("reconnect changed activity/recency: before=%+v after=%+v", before, after)
