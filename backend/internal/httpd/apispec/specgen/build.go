@@ -154,6 +154,10 @@ func schemaName(_ reflect.Type, defaultName string) string {
 // by projectOperations(). Add an entry when a new contract type is introduced;
 // the drift test fails until the spec is regenerated, which flags the gap.
 var schemaNames = map[string]string{
+ "DomainPreservedQueueRecoveryRequest":"PreservedQueueRecoveryRequest",
+ "DomainPreservedQueueRecoveryResult":"PreservedQueueRecoveryResponse",
+ "DomainPreservedQueueTurnProof":"PreservedQueueTurnProof",
+ "DomainPreservedQueueInputProof":"PreservedQueueInputProof",
 	"DomainProviderProfile":                                "ProviderProfile",
 	"ProjectProviderProfilesResult":                        "ProviderProfilesResult",
 	"ProjectProviderProfileSummary":                        "ProviderProfileSummary",
@@ -1222,6 +1226,12 @@ func shellTerminalOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+        {
+            method:http.MethodPost,path:"/api/v1/dev/sessions/{sessionId}/preserved-queue/recover",id:"recoverPreservedSessionQueue",tag:"dev",
+            summary:"Recover exact transport-cleanup queue rows without replaying user input (local listener only)",
+            pathParams:[]any{controllers.SessionIDParam{}},reqBody:controllers.PreservedQueueRecoveryRequest{},
+            resps:[]respUnit{{http.StatusOK,controllers.PreservedQueueRecoveryResponse{}},{http.StatusBadRequest,envelope.APIError{}},{http.StatusForbidden,envelope.APIError{}},{http.StatusConflict,envelope.APIError{}},{http.StatusNotImplemented,envelope.APIError{}}},
+        },
 		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/conversation/queue/reorder", id: "reorderQueuedSessionConversationTurns", tag: "conversations",
 			summary:    "Rewrite the durable queue order for undispatched turns",
