@@ -412,6 +412,7 @@ func Run() error {
 		},
 		// Adapts the store's own snapshot type, so the chat service never has to
 		// import the storage layer.
+		LiveReader: chatsvc.LiveTurnReaderFunc(store.LoadConversationLiveTurns),
 		Reader: chatsvc.SnapshotReaderFunc(func(ctx context.Context, conversationID string) (chatsvc.ConversationRows, error) {
 			rows, err := store.LoadConversationSnapshot(ctx, conversationID)
 			if err != nil {
