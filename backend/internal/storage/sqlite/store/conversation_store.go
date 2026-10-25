@@ -520,7 +520,7 @@ func (s *Store) commitChatSpawn(
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.inTx(ctx, "commit Chat spawn", func(q *gen.Queries) error {
+	return s.inTxDB(ctx, "commit Chat spawn", func(q *gen.Queries, db gen.DBTX) error {
 		owner, err := q.GetSession(ctx, rec.ID)
 		if err != nil {
 			return fmt.Errorf("select Chat session %s: %w", rec.ID, err)
@@ -604,9 +604,6 @@ func (s *Store) commitChatSpawn(
 			}
 			if rows != 1 {
 				return fmt.Errorf("stage Chat controller generation: Chat session %s not found", rec.ID)
-			}
-			if expiredPayload {
-				return true, nil
 			}
 			txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
 			txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
@@ -2864,7 +2861,9 @@ func projectProviderEventTx(
 	if inserted == 0 {
 		return false, nil
 	}
-	txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
+	if expiredPayload { return true,nil }
+ txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
+ txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
 	if err := project(txCtx); err != nil {
 		return false, fmt.Errorf("project provider event %s: %w", method, err)
 	}
