@@ -237,9 +237,16 @@ func TestActivitySettlementReplayUsesProviderItemIndex(t *testing.T) {
 				}
 				// Count candidate visits without wrapping either indexed key, so the
 				// real predicates and partial-index eligibility remain intact.
-				lookup = strings.Replace(lookup, "WHERE conversation_id = ?", "WHERE conversation_id = ? AND activity_candidate_probe(1) = 1", 1)
-				settle = strings.Replace(settle, "WHERE conversation_id = ?", "WHERE conversation_id = ? AND activity_candidate_probe(1) = 1", 1)
-				stream = strings.Replace(stream, "WHERE conversation_id = ?", "WHERE conversation_id = ? AND activity_candidate_probe(1) = 1", 1)
+				instrument := func(query string) string {
+					for _, prefix := range []string{"WHERE conversation_id = ?", "WHERE conversation_activities.conversation_id = ?"} {
+						if strings.Contains(query, prefix) {
+							return strings.Replace(query, prefix, prefix+" AND activity_candidate_probe(1) = 1", 1)
+						}
+					}
+					t.Fatal("activity probe did not match the source predicate")
+					return query
+				}
+				lookup, settle, stream = instrument(lookup), instrument(settle), instrument(stream)
 				activityCandidateProbe.calls.Store(0)
 				for i := range size {
 					item := fmt.Sprintf("item-%d", i)
