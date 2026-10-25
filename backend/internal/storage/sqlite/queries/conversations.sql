@@ -608,12 +608,12 @@ WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
 -- name: FinalizeConversationPlanActivity :exec
 UPDATE conversation_activities
 SET status = 'completed',
-    summary = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.summary ELSE sqlc.arg(summary) END,
-    detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE sqlc.arg(detail_json) END,
+    summary = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.summary ELSE ? END,
+    detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE ? END,
     revision = revision + 1,
-    updated_at = sqlc.arg(updated_at)
+    updated_at = ?
 WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
-  AND turn_id = sqlc.arg(turn_id)
+  AND turn_id = ?
   AND kind = 'plan';
 
 -- The same invariant applies when startup discovers work abandoned by a dead
@@ -657,9 +657,9 @@ WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
 UPDATE conversation_turns
 SET state = 'failed',
     error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE 'controller ended before the turn completed' END,
-    completed_at = sqlc.arg(completed_at)
+    completed_at = ?
 WHERE conversation_turns.conversation_id = sqlc.arg(conversation_turns.conversation_id)
-  AND conversation_turns.handled_by_review_id = sqlc.arg(review_id)
+  AND conversation_turns.handled_by_review_id = ?
   AND conversation_turns.state IN ('queued', 'running');
 
 -- The running turns visible on the active branch, in the same order as the
@@ -1182,11 +1182,11 @@ WHERE conversation_activities.conversation_id = ? AND provider_item_id = ? AND p
 -- name: ResolveConversationApproval :exec
 UPDATE conversation_activities
 SET status = 'resolved',
-    detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE json_patch(detail_json, CAST(sqlc.arg(detail_json) AS TEXT)) END,
+    detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE json_patch(detail_json, CAST(? AS TEXT)) END,
     revision = revision + 1,
-    updated_at = sqlc.arg(updated_at)
+    updated_at = ?
 WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
-  AND request_id = sqlc.arg(request_id)
+  AND request_id = ?
   AND status = 'pending';
 
 -- name: HasPendingConversationInteractions :one
@@ -1263,15 +1263,15 @@ WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
 -- offset, so a multi-byte character here silently corrupts later queries.
 -- name: AppendConversationActivityOutput :execrows
 UPDATE conversation_activities
-SET command_output = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.command_output ELSE substr(command_output || sqlc.arg(delta), 1, sqlc.arg(max_output_chars)) END,
+SET command_output = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.command_output ELSE substr(command_output || ?, 1, ?) END,
     command_output_truncated = CASE
-        WHEN length(command_output) + length(sqlc.arg(delta)) > sqlc.arg(max_output_chars) THEN 1
+        WHEN length(command_output) + length(?) > ? THEN 1
         ELSE command_output_truncated
     END,
     revision = revision + 1,
-    updated_at = sqlc.arg(updated_at)
+    updated_at = ?
 WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
-  AND provider_item_id = sqlc.arg(provider_item_id)
+  AND provider_item_id = ?
   AND status <> 'cancelled'
   AND command_output_truncated = 0;
 
@@ -1292,15 +1292,15 @@ WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities
 -- offset, so a multi-byte character here silently corrupts later queries.
 -- name: AppendConversationActivityStreamedText :execrows
 UPDATE conversation_activities
-SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE substr(streamed_text || sqlc.arg(delta), 1, sqlc.arg(max_text_chars)) END,
+SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE substr(streamed_text || ?, 1, ?) END,
     streamed_text_truncated = CASE
-        WHEN length(streamed_text) + length(sqlc.arg(delta)) > sqlc.arg(max_text_chars) THEN 1
+        WHEN length(streamed_text) + length(?) > ? THEN 1
         ELSE streamed_text_truncated
     END,
     revision = revision + 1,
-    updated_at = sqlc.arg(updated_at)
+    updated_at = ?
 WHERE conversation_activities.conversation_id = sqlc.arg(conversation_activities.conversation_id)
-  AND provider_item_id = sqlc.arg(provider_item_id)
+  AND provider_item_id = ?
   AND status <> 'cancelled'
   AND streamed_text_truncated = 0;
 
@@ -1726,9 +1726,9 @@ WHERE e.branch_id = sqlc.arg(branch_id)
 -- name: RestoreTransportFailedConversationTurn :execrows
 UPDATE conversation_turns
 SET state = 'running', error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE '' END, completed_at = NULL,
-    controller_generation = sqlc.arg(generation)
-WHERE id = sqlc.arg(turn_id) AND conversation_turns.conversation_id = sqlc.arg(conversation_turns.conversation_id)
-  AND branch_id = sqlc.arg(branch_id)
+    controller_generation = ?
+WHERE id = ? AND conversation_turns.conversation_id = sqlc.arg(conversation_turns.conversation_id)
+  AND branch_id = ?
   AND state = 'failed' AND rolled_back_at IS NULL
   AND error_message = 'controller ended before the turn completed';
 
