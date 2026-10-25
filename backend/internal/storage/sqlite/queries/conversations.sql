@@ -566,6 +566,13 @@ SELECT * FROM conversation_turns
 WHERE conversation_id = ? AND provider_turn_id = ?
 LIMIT 1;
 
+-- Nonempty provider IDs use the existing partial unique index.
+-- name: SelectConversationTurnByProviderIDNonempty :one
+SELECT * FROM conversation_turns
+WHERE conversation_id = ? AND provider_turn_id = ?
+  AND provider_turn_id <> ''
+LIMIT 1;
+
 -- name: BindConversationTurnProviderID :exec
 UPDATE conversation_turns
 SET provider_turn_id = ?, started_at = COALESCE(started_at, ?)
@@ -708,6 +715,12 @@ UPDATE conversation_turns
 SET diff_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.diff_json ELSE ? END
 WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ?;
 
+-- Nonempty provider IDs use the existing partial unique index.
+-- name: UpdateConversationTurnDiffNonempty :execrows
+UPDATE conversation_turns
+SET diff_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.diff_json ELSE ? END
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ? AND provider_turn_id <> '';
+
 -- Overwrite the turn's plan. The provider re-sends the whole plan on every change,
 -- so the latest payload is the complete answer and there is nothing to merge.
 --
@@ -719,6 +732,12 @@ WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ?;
 UPDATE conversation_turns
 SET plan_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.plan_json ELSE ? END
 WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ?;
+
+-- Nonempty provider IDs use the existing partial unique index.
+-- name: UpdateConversationTurnPlanNonempty :execrows
+UPDATE conversation_turns
+SET plan_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.plan_json ELSE ? END
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ? AND provider_turn_id <> '';
 
 -- name: SelectConversationTurnByID :one
 SELECT * FROM conversation_turns WHERE id = ? LIMIT 1;

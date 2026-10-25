@@ -56,7 +56,7 @@ func (s *Store) RecoverLiveTransportTurn(ctx context.Context, conversationID str
 		if len(candidates) != 1 {
 			return fmt.Errorf("live turn recovery requires one archived prompt, found %d", len(candidates))
 		}
-		turn, err := q.SelectConversationTurnByProviderID(ctx, gen.SelectConversationTurnByProviderIDParams{ConversationID: conversationID, ProviderTurnID: candidates[0]})
+		turn, err := providerTurnSelectConversationTurnByProviderID(ctx, q, gen.SelectConversationTurnByProviderIDParams{ConversationID: conversationID, ProviderTurnID: candidates[0]})
 		if err != nil {
 			return err
 		}

@@ -1225,7 +1225,7 @@ func (s *Store) AppendImportedUserMessage(
 		return fmt.Errorf("lookup imported user message for turn %s: %w", providerTurnID, err)
 	}
 
-	turn, err := q.SelectConversationTurnByProviderID(ctx,
+	turn, err := providerTurnSelectConversationTurnByProviderID(ctx, q,
 		gen.SelectConversationTurnByProviderIDParams{
 			ConversationID: conversationID,
 			ProviderTurnID: providerTurnID,
@@ -1306,7 +1306,7 @@ func (s *Store) SettleTurn(
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
 
-	turn, err := q.SelectConversationTurnByProviderID(ctx,
+	turn, err := providerTurnSelectConversationTurnByProviderID(ctx, q,
 		gen.SelectConversationTurnByProviderIDParams{
 			ConversationID: conversationID,
 			ProviderTurnID: providerTurnID,
@@ -1389,7 +1389,7 @@ func finalizeCompletedTurnPlan(
 	if err != nil {
 		return fmt.Errorf("encode finalized plan for turn %s: %w", turn.ID, err)
 	}
-	if _, err := q.UpdateConversationTurnPlan(ctx, gen.UpdateConversationTurnPlanParams{
+	if _, err := providerTurnUpdateConversationTurnPlan(ctx, q, gen.UpdateConversationTurnPlanParams{
 		PlanJson:       string(encodedPlan),
 		ConversationID: turn.ConversationID,
 		ProviderTurnID: turn.ProviderTurnID,
@@ -1983,7 +1983,7 @@ func (s *Store) SetTurnPlan(
 
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
-	rows, err := q.UpdateConversationTurnPlan(ctx, gen.UpdateConversationTurnPlanParams{
+	rows, err := providerTurnUpdateConversationTurnPlan(ctx, q, gen.UpdateConversationTurnPlanParams{
 		PlanJson:       string(encoded),
 		ConversationID: conversationID,
 		ProviderTurnID: providerTurnID,
@@ -2164,7 +2164,7 @@ func (s *Store) CompleteQueuedTurnPromotion(
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.inTx(ctx, "complete queued turn promotion", func(q *gen.Queries) error {
-		target, err := q.SelectConversationTurnByProviderID(ctx,
+		target, err := providerTurnSelectConversationTurnByProviderID(ctx, q,
 			gen.SelectConversationTurnByProviderIDParams{
 				ConversationID: conversationID, ProviderTurnID: providerTurnID,
 			})
@@ -2692,7 +2692,7 @@ func (s *Store) SetTurnDiff(
 
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
-	rows, err := q.UpdateConversationTurnDiff(ctx, gen.UpdateConversationTurnDiffParams{
+	rows, err := providerTurnUpdateConversationTurnDiff(ctx, q, gen.UpdateConversationTurnDiffParams{
 		DiffJson:       string(encoded),
 		ConversationID: conversationID,
 		ProviderTurnID: providerTurnID,
@@ -3486,7 +3486,7 @@ func (s *Store) turnIDFor(ctx context.Context, conversationID, providerTurnID st
 	if providerTurnID == "" {
 		return sql.NullString{}
 	}
-	row, err := s.conversationReader(ctx).SelectConversationTurnByProviderID(ctx,
+	row, err := providerTurnSelectConversationTurnByProviderID(ctx, s.conversationReader(ctx),
 		gen.SelectConversationTurnByProviderIDParams{
 			ConversationID: conversationID,
 			ProviderTurnID: providerTurnID,

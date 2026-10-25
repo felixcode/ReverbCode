@@ -3374,6 +3374,45 @@ func (q *Queries) SelectConversationTurnByProviderID(ctx context.Context, arg Se
 	return i, err
 }
 
+const selectConversationTurnByProviderIDNonempty = `-- name: SelectConversationTurnByProviderIDNonempty :one
+SELECT id, conversation_id, handled_by_session_id, provider_turn_id, controller_generation, state, error_message, requested_at, started_at, completed_at, diff_json, rolled_back_at, plan_json, branch_id, promotion_started_at, promoted_to_turn_id, retry_of_turn_id, handled_by_review_id FROM conversation_turns
+WHERE conversation_id = ? AND provider_turn_id = ?
+  AND provider_turn_id <> ''
+LIMIT 1
+`
+
+type SelectConversationTurnByProviderIDNonemptyParams struct {
+	ConversationID string
+	ProviderTurnID string
+}
+
+// Nonempty provider IDs use the existing partial unique index.
+func (q *Queries) SelectConversationTurnByProviderIDNonempty(ctx context.Context, arg SelectConversationTurnByProviderIDNonemptyParams) (ConversationTurn, error) {
+	row := q.db.QueryRowContext(ctx, selectConversationTurnByProviderIDNonempty, arg.ConversationID, arg.ProviderTurnID)
+	var i ConversationTurn
+	err := row.Scan(
+		&i.ID,
+		&i.ConversationID,
+		&i.HandledBySessionID,
+		&i.ProviderTurnID,
+		&i.ControllerGeneration,
+		&i.State,
+		&i.ErrorMessage,
+		&i.RequestedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.DiffJson,
+		&i.RolledBackAt,
+		&i.PlanJson,
+		&i.BranchID,
+		&i.PromotionStartedAt,
+		&i.PromotedToTurnID,
+		&i.RetryOfTurnID,
+		&i.HandledByReviewID,
+	)
+	return i, err
+}
+
 const selectConversationTurns = `-- name: SelectConversationTurns :many
 WITH RECURSIVE active_path(branch_id, max_sequence) AS (
     SELECT conversations.active_branch_id, CAST(NULL AS INTEGER)
@@ -4596,6 +4635,27 @@ func (q *Queries) UpdateConversationTurnDiff(ctx context.Context, arg UpdateConv
 	return result.RowsAffected()
 }
 
+const updateConversationTurnDiffNonempty = `-- name: UpdateConversationTurnDiffNonempty :execrows
+UPDATE conversation_turns
+SET diff_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.diff_json ELSE ? END
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ? AND provider_turn_id <> ''
+`
+
+type UpdateConversationTurnDiffNonemptyParams struct {
+	DiffJson       string
+	ConversationID string
+	ProviderTurnID string
+}
+
+// Nonempty provider IDs use the existing partial unique index.
+func (q *Queries) UpdateConversationTurnDiffNonempty(ctx context.Context, arg UpdateConversationTurnDiffNonemptyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateConversationTurnDiffNonempty, arg.DiffJson, arg.ConversationID, arg.ProviderTurnID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateConversationTurnPlan = `-- name: UpdateConversationTurnPlan :execrows
 UPDATE conversation_turns
 SET plan_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.plan_json ELSE ? END
@@ -4617,6 +4677,27 @@ type UpdateConversationTurnPlanParams struct {
 // offset, so a multi-byte character here silently corrupts later queries.
 func (q *Queries) UpdateConversationTurnPlan(ctx context.Context, arg UpdateConversationTurnPlanParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, updateConversationTurnPlan, arg.PlanJson, arg.ConversationID, arg.ProviderTurnID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateConversationTurnPlanNonempty = `-- name: UpdateConversationTurnPlanNonempty :execrows
+UPDATE conversation_turns
+SET plan_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.plan_json ELSE ? END
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ? AND provider_turn_id <> ''
+`
+
+type UpdateConversationTurnPlanNonemptyParams struct {
+	PlanJson       string
+	ConversationID string
+	ProviderTurnID string
+}
+
+// Nonempty provider IDs use the existing partial unique index.
+func (q *Queries) UpdateConversationTurnPlanNonempty(ctx context.Context, arg UpdateConversationTurnPlanNonemptyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateConversationTurnPlanNonempty, arg.PlanJson, arg.ConversationID, arg.ProviderTurnID)
 	if err != nil {
 		return 0, err
 	}
