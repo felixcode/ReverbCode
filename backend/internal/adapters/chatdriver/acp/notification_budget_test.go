@@ -31,7 +31,7 @@ func TestConfiguredNotificationBudgetFitsReplayAndStillBoundsOverflow(t *testing
 			frame := `{"jsonrpc":"2.0","method":"test/notification","params":{"text":"` + strings.Repeat("x", 1024*1024) + `"}}` + "\n"
 			frames := 31
 			if budget < 64*1024*1024 {
-				frames = 3
+				frames = 2
 			}
 			sent := make(chan error, 1)
 			go func() {

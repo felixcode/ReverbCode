@@ -113,3 +113,31 @@ func TestExplicitTerminateWinsBeforeTransportClose(t *testing.T) {
 		t.Fatal("explicit exit lost to disconnect")
 	}
 }
+
+func TestExplicitExitStillTerminatesAfterOrdinaryClose(t *testing.T) {
+	provider := &observedDisconnectConversation{terminatingConversation: &terminatingConversation{fakeConversation: newFakeConversation()}, disposition: ports.ChatDisconnectPreserved}
+	h := newHarnessWithConversation(t, provider)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	turn, err := h.ctrl.Send(ctx, ports.ChatUserMessage{Text: "original input"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ctrl.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := h.st.TurnByID(ctx, turn.ID)
+	if err != nil || before.State != domain.TurnStateRunning {
+		t.Fatal("ordinary detach changed live work")
+	}
+	if err := h.ctrl.Terminate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ctrl.Terminate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := h.st.TurnByID(ctx, turn.ID)
+	if err != nil || after.State != domain.TurnStateFailed || provider.terminations.Load() != 1 {
+		t.Fatal("ordinary Close once swallowed explicit Exit")
+	}
+}

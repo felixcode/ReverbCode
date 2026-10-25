@@ -50,16 +50,34 @@ func captureDisconnectState(d Descriptor, dataDirs []string) func() DisconnectSt
 	host, _, hostErr := inspectProcess(d.PID)
 	var provider processIdentity
 	var providerErr error
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", d.PID, d.PID))
-	children := strings.Fields(string(b))
-	if err == nil && len(children) == 1 {
-		pid, e := strconv.Atoi(children[0])
-		if e == nil {
-			provider, _, providerErr = inspectProcess(pid)
-		} else {
-			providerErr = e
+	// A Go host may launch the provider from any OS thread. Linux associates
+	// children with that task, not necessarily with the thread-group leader.
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", d.PID))
+	children := make(map[int]struct{})
+	if err == nil && len(tasks) <= 1024 {
+		for _, task := range tasks {
+			b, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/children", d.PID, task.Name()))
+			if readErr != nil {
+				providerErr = readErr
+				break
+			}
+			for _, child := range strings.Fields(string(b)) {
+				pid, parseErr := strconv.Atoi(child)
+				if parseErr != nil {
+					providerErr = parseErr
+					break
+				}
+				children[pid] = struct{}{}
+			}
 		}
 	} else {
+		providerErr = fmt.Errorf("host task identity unknown")
+	}
+	if providerErr == nil && len(children) == 1 {
+		for pid := range children {
+			provider, _, providerErr = inspectProcess(pid)
+		}
+	} else if providerErr == nil {
 		providerErr = fmt.Errorf("provider identity unknown")
 	}
 	return func() DisconnectState {

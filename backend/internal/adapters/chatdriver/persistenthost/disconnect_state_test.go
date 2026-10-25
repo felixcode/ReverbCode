@@ -18,7 +18,7 @@ func TestDisconnectIdentityDistinguishesProviderEndAndUnknownOwner(t *testing.T)
 	}
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
 	root := t.TempDir()
-	d := Descriptor{Version: ProtocolVersion, SessionID: "identity", Protocol: ProtocolACP, PID: os.Getpid(), Token: "synthetic", OwnershipFingerprint: "synthetic-owner", StartedAt: time.Now()}
+	d := Descriptor{Version: ProtocolVersion, SessionID: "identity", Protocol: ProtocolACP, Address: "127.0.0.1:1", PID: os.Getpid(), Token: "synthetic", OwnershipFingerprint: "synthetic-owner", StartedAt: time.Now()}
 	if err := writeDescriptor(root, d); err != nil {
 		t.Fatal(err)
 	}

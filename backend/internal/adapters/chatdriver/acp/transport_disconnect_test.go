@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/persistenthost"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"sync/atomic"
@@ -16,6 +17,10 @@ func TestACPDisconnectEvidenceAndDetachThenTerminate(t *testing.T) {
 	if conv.DisconnectedProviderState() != ports.ChatDisconnectNotPersistent {
 		t.Fatal("live connection classified disconnected")
 	}
+	if err := conv.ActivateLiveReconnect(context.Background(), "durable-turn"); err != nil {
+		t.Fatal(err)
+	}
+	conv.Events()
 	_ = host.Close()
 	select {
 	case <-conv.conn.Done():
