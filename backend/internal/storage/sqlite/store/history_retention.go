@@ -106,11 +106,14 @@ func (s *Store) applyHistoryRetention(ctx context.Context, db gen.DBTX, conversa
 			if end > len(ids) {
 				end = len(ids)
 			}
-			args := []any{kind, conversationID}
+			args := make([]any, 0, end-start+2)
 			for _, id := range ids[start:end] {
 				args = append(args, id)
 			}
-			query := `SELECT object_kind,object_id,semantic_sha256,prompt_sha256 FROM ao_history_retention WHERE object_kind=? AND conversation_id=? AND object_id IN (` + strings.TrimSuffix(strings.Repeat("?,", end-start), ",") + `)`
+			args = append(args, kind, conversationID)
+			// Keep the page IDs outermost so the existing (kind, id) primary key
+			// wins over scanning every audit marker in this conversation.
+			query := `WITH wanted(wanted_id) AS (VALUES ` + strings.TrimSuffix(strings.Repeat("(?),", end-start), ",") + `) SELECT object_kind,object_id,semantic_sha256,prompt_sha256 FROM wanted CROSS JOIN ao_history_retention ON object_id=wanted_id WHERE object_kind=? AND conversation_id=?`
 			rows, err := db.QueryContext(ctx, query, args...)
 			if err != nil {
 				return err

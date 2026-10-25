@@ -26,6 +26,7 @@ import (
 type retentionObservedDriver struct {
 	afterMarker func()
 	markerRows  *atomic.Int64
+	markerQuery func(string, []driver.NamedValue)
 }
 
 func (d retentionObservedDriver) Open(name string) (driver.Conn, error) {
@@ -54,8 +55,11 @@ func (c *retentionObservedConn) QueryContext(ctx context.Context, q string, args
 		callback = c.owner.afterMarker
 	}
 	var count *atomic.Int64
-	if strings.Contains(q, "SELECT object_kind,object_id,semantic_sha256,prompt_sha256 FROM ao_history_retention") {
+	if strings.Contains(q, "SELECT object_kind,object_id,semantic_sha256,prompt_sha256 FROM ") {
 		count = c.owner.markerRows
+		if c.owner.markerQuery != nil {
+			c.owner.markerQuery(q, args)
+		}
 	}
 	return &retentionObservedRows{Rows: rows, after: callback, count: count}, nil
 }
