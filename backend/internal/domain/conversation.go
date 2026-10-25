@@ -512,8 +512,11 @@ type ConversationSettings struct {
 // ConversationTurn is one user or automation request plus the agent work it
 // caused.
 type ConversationTurn struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversationId"`
+	ContentExpired          bool   `json:"contentExpired,omitempty"`
+	RetentionSemanticSHA256 string `json:"-"`
+	RetentionPromptSHA256   string `json:"-"`
+	ID                      string `json:"id"`
+	ConversationID          string `json:"conversationId"`
 	// BranchID is durable provider-lineage metadata used to keep opaque turn ids
 	// inside the provider ownership epoch that created them.
 	BranchID string `json:"-"`
@@ -624,6 +627,10 @@ type RetryPrompt struct {
 
 // ConversationMessage is one readable block of text.
 type ConversationMessage struct {
+	RetentionCoordination   bool   `json:"-"`
+	ContentExpired          bool   `json:"contentExpired,omitempty"`
+	RetentionSemanticSHA256 string `json:"-"`
+	RetentionPromptSHA256   string `json:"-"`
 	// InteractionAt is an internal write fact, independent of history CreatedAt.
 	InteractionAt  time.Time `json:"-"`
 	ID             string    `json:"id"`
@@ -661,13 +668,16 @@ type ConversationMessage struct {
 // ConversationActivity is one non-message timeline entry: a command, a diff, a
 // plan, an approval request, a usage report, an error.
 type ConversationActivity struct {
-	ID             string         `json:"id"`
-	ConversationID string         `json:"conversationId"`
-	TurnID         string         `json:"turnId,omitempty"`
-	Sequence       int64          `json:"sequence"`
-	Revision       int64          `json:"revision"`
-	Kind           ActivityKind   `json:"kind"`
-	Status         ActivityStatus `json:"status"`
+	ContentExpired          bool           `json:"contentExpired,omitempty"`
+	RetentionSemanticSHA256 string         `json:"-"`
+	RetentionPromptSHA256   string         `json:"-"`
+	ID                      string         `json:"id"`
+	ConversationID          string         `json:"conversationId"`
+	TurnID                  string         `json:"turnId,omitempty"`
+	Sequence                int64          `json:"sequence"`
+	Revision                int64          `json:"revision"`
+	Kind                    ActivityKind   `json:"kind"`
+	Status                  ActivityStatus `json:"status"`
 	// Summary is the one-line label a client renders when collapsed.
 	Summary string `json:"summary"`
 	// Detail is the typed provider-neutral payload for this kind, as JSON. It
@@ -829,3 +839,6 @@ const (
 	ConversationSteerRejectedByProvider          ConversationSteerRejectionKind = "provider_refused"
 	ConversationSteerRejectedInterfaceTransition ConversationSteerRejectionKind = "interface_transition"
 )
+
+// ErrHistoryContentExpired refuses replay or edits that would use a retained stub.
+var ErrHistoryContentExpired = errors.New("conversation content has expired; submit a new prompt")

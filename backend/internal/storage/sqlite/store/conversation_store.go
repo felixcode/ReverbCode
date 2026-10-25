@@ -520,7 +520,7 @@ func (s *Store) commitChatSpawn(
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.inTx(ctx, "commit Chat spawn", func(q *gen.Queries) error {
+	return s.inTxDB(ctx, "commit Chat spawn", func(q *gen.Queries, db gen.DBTX) error {
 		owner, err := q.GetSession(ctx, rec.ID)
 		if err != nil {
 			return fmt.Errorf("select Chat session %s: %w", rec.ID, err)
@@ -606,6 +606,7 @@ func (s *Store) commitChatSpawn(
 				return fmt.Errorf("stage Chat controller generation: Chat session %s not found", rec.ID)
 			}
 			txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
+			txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
 			if err := prepare(txCtx); err != nil {
 				return fmt.Errorf("project native provider history: %w", err)
 			}
@@ -637,11 +638,11 @@ func (s *Store) ConversationBranch(
 
 // ConversationBranches lists every durable sibling and descendant in creation
 // order. Only the current head is marked active.
-func (s *Store) ConversationBranches(
-	ctx context.Context,
-	conversationID string,
-) ([]domain.ConversationBranch, error) {
-	rows, err := s.qr.SelectConversationBranches(ctx, conversationID)
+func (s *Store) ConversationBranches(ctx context.Context, conversationID string) ([]domain.ConversationBranch, error) {
+	return conversationBranches(ctx, s.qr, conversationID)
+}
+func conversationBranches(ctx context.Context, q *gen.Queries, conversationID string) ([]domain.ConversationBranch, error) {
+	rows, err := q.SelectConversationBranches(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("select conversation branches for %s: %w", conversationID, err)
 	}
@@ -658,7 +659,21 @@ func (s *Store) ConversationEditAnchor(
 	ctx context.Context,
 	conversationID, replacedTurnID string,
 ) (domain.ConversationEditAnchor, error) {
-	row, err := s.qr.SelectConversationEditAnchor(ctx, gen.SelectConversationEditAnchorParams{
+	tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return domain.ConversationEditAnchor{}, err
+	}
+	defer tx.Rollback()
+	q := s.historyReadQueries(tx)
+	expired, err := s.historyTurnExpired(ctx, tx, conversationID, replacedTurnID)
+	if err != nil {
+		return domain.ConversationEditAnchor{}, err
+	}
+	if expired {
+		return domain.ConversationEditAnchor{}, domain.ErrHistoryContentExpired
+	}
+
+	row, err := q.SelectConversationEditAnchor(ctx, gen.SelectConversationEditAnchorParams{
 		ConversationID: conversationID,
 		ReplacedTurnID: nullableString(replacedTurnID),
 	})
@@ -2787,7 +2802,7 @@ func (s *Store) projectProviderEvent(
 ) (bool, error) {
 	if q, ok := ctx.Value(conversationProjectionTxKey{}).(*gen.Queries); ok && q != nil {
 		return projectProviderEventTx(
-			ctx, q, conversationID, session, reviewID, generation,
+			ctx, q, s.retentionDB(ctx), conversationID, session, reviewID, generation,
 			providerEventID, method, payloadJSON, now, project,
 		)
 	}
@@ -2801,7 +2816,7 @@ func (s *Store) projectProviderEvent(
 	defer func() { _ = tx.Rollback() }()
 	q := s.qw.WithTx(tx)
 	projected, err := projectProviderEventTx(
-		ctx, q, conversationID, session, reviewID, generation,
+		ctx, q, tx, conversationID, session, reviewID, generation,
 		providerEventID, method, payloadJSON, now, project,
 	)
 	if err != nil {
@@ -2816,6 +2831,7 @@ func (s *Store) projectProviderEvent(
 func projectProviderEventTx(
 	ctx context.Context,
 	q *gen.Queries,
+	db gen.DBTX,
 	conversationID string,
 	session domain.SessionID,
 	reviewID, generation, providerEventID, method, payloadJSON string,
@@ -2839,6 +2855,12 @@ func projectProviderEventTx(
 			return false, nil
 		}
 	}
+	var redactErr error
+	var expiredPayload bool
+	payloadJSON, expiredPayload, redactErr = redactExpiredProviderPayload(ctx, db, conversationID, payloadJSON)
+	if redactErr != nil {
+		return false, redactErr
+	}
 	inserted, err := q.InsertConversationProviderEvent(ctx, gen.InsertConversationProviderEventParams{
 		ConversationID:  conversationID,
 		SessionID:       session,
@@ -2853,7 +2875,11 @@ func projectProviderEventTx(
 	if inserted == 0 {
 		return false, nil
 	}
+	if expiredPayload {
+		return false, nil
+	}
 	txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
+	txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
 	if err := project(txCtx); err != nil {
 		return false, fmt.Errorf("project provider event %s: %w", method, err)
 	}
@@ -3073,28 +3099,12 @@ func (s *Store) LoadConversationSnapshotPage(
 	beforeSequence int64,
 	limit int64,
 ) (ConversationSnapshot, error) {
-	conv, err := s.qr.SelectConversationByID(ctx, conversationID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ConversationSnapshot{}, ErrConversationNotFound
-	}
+	tx, q, conv, err := s.beginConversationSnapshot(ctx, conversationID)
 	if err != nil {
-		return ConversationSnapshot{}, fmt.Errorf("select conversation %s: %w", conversationID, err)
+		return ConversationSnapshot{}, err
 	}
+	defer tx.Rollback()
 
-	// Targeted lazy reconciliation of legacy demands, using durable provider
-	// evidence. Ordinary snapshots remain read-only and avoid the writer lock.
-	if account := conversationToDomain(conv).Account; account != nil && account.ReauthRequiredAt != nil {
-		reconciled, reconcileErr := s.ReconcileConversationAuthentication(ctx, conversationID, "", "", time.Now())
-		if reconcileErr != nil {
-			return ConversationSnapshot{}, reconcileErr
-		}
-		if reconciled != nil && reconciled.ReauthRequiredAt == nil {
-			conv, err = s.qr.SelectConversationByID(ctx, conversationID)
-			if err != nil {
-				return ConversationSnapshot{}, err
-			}
-		}
-	}
 	if limit <= 0 {
 		limit = DefaultConversationPageSize
 	}
@@ -3104,11 +3114,11 @@ func (s *Store) LoadConversationSnapshotPage(
 	if beforeSequence <= 0 || beforeSequence > conv.LatestSequence+1 {
 		beforeSequence = conv.LatestSequence + 1
 	}
-	visibleAfterSequence, err := s.conversationVisibleAfterSequence(ctx, conv)
+	visibleAfterSequence, err := s.conversationVisibleAfterSequence(ctx, q, conv)
 	if err != nil {
 		return ConversationSnapshot{}, err
 	}
-	presentation := s.conversationHistoryPresentation(ctx, conversationID)
+	presentation := s.conversationHistoryPresentation(ctx, q, conversationID)
 	if beforeSequence <= visibleAfterSequence {
 		snapshot := ConversationSnapshot{
 			Conversation:                     conversationToDomain(conv),
@@ -3124,7 +3134,7 @@ func (s *Store) LoadConversationSnapshotPage(
 	}
 	fetchLimit := limit + 1
 
-	messageRows, err := s.qr.SelectConversationMessagesPage(ctx, gen.SelectConversationMessagesPageParams{
+	messageRows, err := q.SelectConversationMessagesPage(ctx, gen.SelectConversationMessagesPageParams{
 		ConversationID: conversationID,
 		BeforeSequence: beforeSequence,
 		PageLimit:      fetchLimit,
@@ -3132,7 +3142,7 @@ func (s *Store) LoadConversationSnapshotPage(
 	if err != nil {
 		return ConversationSnapshot{}, fmt.Errorf("select message page: %w", err)
 	}
-	activityRows, err := s.qr.SelectConversationActivitiesPage(ctx, gen.SelectConversationActivitiesPageParams{
+	activityRows, err := q.SelectConversationActivitiesPage(ctx, gen.SelectConversationActivitiesPageParams{
 		ConversationID: conversationID,
 		BeforeSequence: beforeSequence,
 		PageLimit:      fetchLimit,
@@ -3168,7 +3178,7 @@ func (s *Store) LoadConversationSnapshotPage(
 		hasMore = false
 	}
 
-	turnRows, err := s.qr.SelectConversationTurnsPage(ctx, gen.SelectConversationTurnsPageParams{
+	turnRows, err := q.SelectConversationTurnsPage(ctx, gen.SelectConversationTurnsPageParams{
 		ConversationID: conversationID,
 		OldestSequence: oldest,
 		BeforeSequence: beforeSequence,
@@ -3176,7 +3186,7 @@ func (s *Store) LoadConversationSnapshotPage(
 	if err != nil {
 		return ConversationSnapshot{}, fmt.Errorf("select turn page: %w", err)
 	}
-	retriedSources, err := s.conversationRetriedSources(ctx, conversationID)
+	retriedSources, err := s.conversationRetriedSources(ctx, q, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, err
 	}
@@ -3212,17 +3222,21 @@ func (s *Store) LoadConversationSnapshotPage(
 			snapshot.Activities = append(snapshot.Activities, activityToDomain(activityRows[i]))
 		}
 	}
+	if err := s.applyHistoryRetention(ctx, tx, conversationID, &snapshot); err != nil {
+		return ConversationSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
 func (s *Store) conversationVisibleAfterSequence(
 	ctx context.Context,
+	q *gen.Queries,
 	conv gen.Conversation,
 ) (int64, error) {
 	if conv.Scope != domain.ConversationScopeProject || conv.CurrentSessionID == nil || *conv.CurrentSessionID == "" {
 		return 0, nil
 	}
-	sequence, err := s.qr.SelectConversationContextResetSequence(ctx, gen.SelectConversationContextResetSequenceParams{
+	sequence, err := q.SelectConversationContextResetSequence(ctx, gen.SelectConversationContextResetSequenceParams{
 		ConversationID: conv.ID,
 		ProviderItemID: domain.ConversationContextResetProviderItemID(*conv.CurrentSessionID),
 	})
@@ -3230,7 +3244,7 @@ func (s *Store) conversationVisibleAfterSequence(
 		return 0, fmt.Errorf("select context reset boundary for conversation %s: %w", conv.ID, err)
 	}
 	if sequence == 0 {
-		pending, pendingErr := s.projectConversationResetPending(ctx, conv)
+		pending, pendingErr := s.projectConversationResetPending(ctx, q, conv)
 		if pendingErr != nil {
 			return 0, pendingErr
 		}
@@ -3241,14 +3255,14 @@ func (s *Store) conversationVisibleAfterSequence(
 	return sequence, nil
 }
 
-func (s *Store) projectConversationResetPending(ctx context.Context, conv gen.Conversation) (bool, error) {
+func (s *Store) projectConversationResetPending(ctx context.Context, q *gen.Queries, conv gen.Conversation) (bool, error) {
 	if conv.Scope != domain.ConversationScopeProject ||
 		conv.CurrentSessionID == nil ||
 		*conv.CurrentSessionID == "" ||
 		conv.LatestSequence <= 0 {
 		return false, nil
 	}
-	current, err := s.qr.GetSession(ctx, *conv.CurrentSessionID)
+	current, err := q.GetSession(ctx, *conv.CurrentSessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -3258,7 +3272,7 @@ func (s *Store) projectConversationResetPending(ctx context.Context, conv gen.Co
 	if current.ProviderConversationID != "" {
 		return false, nil
 	}
-	active, err := s.qr.SelectConversationBranch(ctx, gen.SelectConversationBranchParams{
+	active, err := q.SelectConversationBranch(ctx, gen.SelectConversationBranchParams{
 		ConversationID: conv.ID,
 		BranchID:       conv.ActiveBranchID,
 	})
@@ -3284,50 +3298,33 @@ func (s *Store) LoadConversationSnapshot(
 	ctx context.Context,
 	conversationID string,
 ) (ConversationSnapshot, error) {
-	conv, err := s.qr.SelectConversationByID(ctx, conversationID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ConversationSnapshot{}, ErrConversationNotFound
-	}
+	tx, q, conv, err := s.beginConversationSnapshot(ctx, conversationID)
 	if err != nil {
-		return ConversationSnapshot{}, fmt.Errorf("select conversation %s: %w", conversationID, err)
+		return ConversationSnapshot{}, err
 	}
+	defer tx.Rollback()
 
-	// Targeted lazy reconciliation of legacy demands, using durable provider
-	// evidence. Ordinary snapshots remain read-only and avoid the writer lock.
-	if account := conversationToDomain(conv).Account; account != nil && account.ReauthRequiredAt != nil {
-		reconciled, reconcileErr := s.ReconcileConversationAuthentication(ctx, conversationID, "", "", time.Now())
-		if reconcileErr != nil {
-			return ConversationSnapshot{}, reconcileErr
-		}
-		if reconciled != nil && reconciled.ReauthRequiredAt == nil {
-			conv, err = s.qr.SelectConversationByID(ctx, conversationID)
-			if err != nil {
-				return ConversationSnapshot{}, err
-			}
-		}
-	}
-
-	turnRows, err := s.qr.SelectConversationTurns(ctx, conversationID)
+	turnRows, err := q.SelectConversationTurns(ctx, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, fmt.Errorf("select turns: %w", err)
 	}
-	retriedSources, err := s.conversationRetriedSources(ctx, conversationID)
+	retriedSources, err := s.conversationRetriedSources(ctx, q, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, err
 	}
 	// Messages and activities exclude anything attached to a rolled-back turn: the
 	// agent has forgotten those, and a timeline that still showed them would be
 	// describing a conversation the agent is not in.
-	messageRows, err := s.qr.SelectConversationMessages(ctx, conversationID)
+	messageRows, err := q.SelectConversationMessages(ctx, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, fmt.Errorf("select messages: %w", err)
 	}
-	activityRows, err := s.qr.SelectConversationActivities(ctx, conversationID)
+	activityRows, err := q.SelectConversationActivities(ctx, conversationID)
 	if err != nil {
 		return ConversationSnapshot{}, fmt.Errorf("select activities: %w", err)
 	}
 
-	presentation := s.conversationHistoryPresentation(ctx, conversationID)
+	presentation := s.conversationHistoryPresentation(ctx, q, conversationID)
 	snapshot := ConversationSnapshot{
 		Conversation:                     conversationToDomain(conv),
 		ActiveBranch:                     presentation.activeBranch,
@@ -3348,11 +3345,14 @@ func (s *Store) LoadConversationSnapshot(
 	for _, row := range activityRows {
 		snapshot.Activities = append(snapshot.Activities, activityToDomain(row))
 	}
+	if err := s.applyHistoryRetention(ctx, tx, conversationID, &snapshot); err != nil {
+		return ConversationSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
-func (s *Store) conversationRetriedSources(ctx context.Context, conversationID string) (map[string]bool, error) {
-	rows, err := s.qr.SelectConversationRetriedSourceTurnIDs(ctx, conversationID)
+func (s *Store) conversationRetriedSources(ctx context.Context, q *gen.Queries, conversationID string) (map[string]bool, error) {
+	rows, err := q.SelectConversationRetriedSourceTurnIDs(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("select retried conversation sources: %w", err)
 	}
@@ -3392,9 +3392,10 @@ func (p conversationHistoryPresentation) filterInactiveProviderTurn(turn *domain
 // nodes, but unlike an edit branch they replace no human prompt.
 func (s *Store) conversationHistoryPresentation(
 	ctx context.Context,
+	q *gen.Queries,
 	conversationID string,
 ) conversationHistoryPresentation {
-	branches, err := s.ConversationBranches(ctx, conversationID)
+	branches, err := conversationBranches(ctx, q, conversationID)
 	if err != nil {
 		return conversationHistoryPresentation{}
 	}
@@ -3411,7 +3412,7 @@ func (s *Store) conversationHistoryPresentation(
 				branch.ParentBranchID != "" && branch.ReplacedTurnID != ""
 		}
 	}
-	if sequence, queryErr := s.qr.SelectConversationNativeForkAvailableAfterSequence(ctx, conversationID); queryErr == nil {
+	if sequence, queryErr := q.SelectConversationNativeForkAvailableAfterSequence(ctx, conversationID); queryErr == nil {
 		presentation.nativeForkAvailableAfterSequence = sequence
 	}
 	for _, branch := range branches {
@@ -3777,7 +3778,21 @@ func (s *Store) ProviderEventsSince(
 // re-dispatching it as a new turn. The content is loaded from AO's own rows
 // rather than from a client request that could be stale or substituted.
 func (s *Store) RetryPrompt(ctx context.Context, conversationID, turnID string) (domain.RetryPrompt, error) {
-	row, err := s.qr.SelectRetryableConversationPrompt(ctx, gen.SelectRetryableConversationPromptParams{
+	tx, err := s.readDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return domain.RetryPrompt{}, err
+	}
+	defer tx.Rollback()
+	q := s.historyReadQueries(tx)
+	expired, err := s.historyTurnExpired(ctx, tx, conversationID, turnID)
+	if err != nil {
+		return domain.RetryPrompt{}, err
+	}
+	if expired {
+		return domain.RetryPrompt{}, domain.ErrHistoryContentExpired
+	}
+
+	row, err := q.SelectRetryableConversationPrompt(ctx, gen.SelectRetryableConversationPromptParams{
 		ID: turnID, ConversationID: conversationID,
 	})
 	if err != nil {

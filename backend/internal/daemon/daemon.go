@@ -898,6 +898,7 @@ func Run() error {
 	}
 
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
+		HistoryRetention:   store.HistoryRetentionCapability,
 		Projects:           projectSvc,
 		HostID:             hostIdentity.HostID,
 		Endpoints:          bs,

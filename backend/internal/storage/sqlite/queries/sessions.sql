@@ -44,7 +44,7 @@ UPDATE sessions SET
     issue_id = ?, kind = ?, harness = ?, reviewer_harness = ?, reviewer_agent_config = ?, auto_review_enabled = ?, display_name = ?,
     activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
-    runtime_launch_id = ?, agent_session_id = ?, agent_session_id_launch_id = ?, native_identity_observed_at = ?, prompt = ?,
+    runtime_launch_id = ?, agent_session_id = ?, agent_session_id_launch_id = ?, native_identity_observed_at = ?, prompt = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) THEN sessions.prompt ELSE ? END,
     latest_user_prompt = ?, latest_user_prompt_at = ?, latest_assistant_update = ?, latest_assistant_update_at = ?,
     conversation_checkpoint_state = ?, conversation_checkpoint_generation = ?, conversation_checkpoint_native_id = ?,
     conversation_checkpoint_unsettled = ?, conversation_checkpoint_turn_id = ?, native_checkpoint_evidence = ?,
@@ -226,7 +226,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions WHERE id = ?;
 
 -- name: GetSessionByAutomationRunID :one
@@ -245,7 +246,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions WHERE automation_run_id = ?;
 
 -- name: ListSessionsByProject :many
@@ -264,7 +266,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions WHERE project_id IS ? ORDER BY num;
 
 -- name: ListAllSessions :many
@@ -283,7 +286,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled, model, effort, session_permissions,
     provision_state, provision_error, provision_steps, is_task_preparation, automation_run_id, automation_launch_completed,
     claude_activity_facts, codex_activity_facts,
-    hibernated_at
+    hibernated_at,
+    EXISTS(SELECT 1 FROM ao_history_retention WHERE object_kind='session' AND object_id=sessions.id) AS prompt_expired
 FROM sessions ORDER BY project_id, num;
 
 -- name: ListChatHibernationCandidates :many

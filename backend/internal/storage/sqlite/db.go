@@ -143,6 +143,11 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 
+	if err := sqlitestore.EnsureHistoryRetentionSchema(writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("history retention schema: %w", err)
+	}
+
 	readDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		_ = writeDB.Close()
@@ -183,7 +188,13 @@ func OpenReadOnly(ctx context.Context, dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite read-only reader: %w", err)
 	}
 
-	return sqlitestore.NewStore(writeDB, readDB), nil
+	compatible, err := sqlitestore.NewReadOnlyStore(ctx, writeDB, readDB)
+	if err != nil {
+		_ = readDB.Close()
+		_ = writeDB.Close()
+		return nil, err
+	}
+	return compatible, nil
 }
 
 // gooseMu serialises calls into goose. goose v3 keeps its baseFS / logger /
@@ -276,6 +287,11 @@ func OpenPreMigrated(dataDir string) (*Store, error) {
 				"the template is stale — rebuild it with a full sqlite.Open call",
 			got, want,
 		)
+	}
+
+	if err := sqlitestore.EnsureHistoryRetentionSchema(writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("history retention schema: %w", err)
 	}
 
 	readDB, err := sql.Open("sqlite", dsn)

@@ -35,6 +35,9 @@ type asyncChatSpawnRun struct {
 // beginAsyncChatSpawn publishes the session, records the opening prompt in the
 // durable queue, and hands the rest to the background.
 func (m *Manager) beginAsyncChatSpawn(ctx context.Context, in asyncChatSpawn) (domain.SessionRecord, int, int, error) {
+	if in.record.Metadata.PromptExpired {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("saved prompt content has expired; submit a new prompt: %w", ErrNotResumable)
+	}
 	id := in.record.ID
 	rollback := func() {
 		if in.retry {

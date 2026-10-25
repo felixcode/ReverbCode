@@ -344,6 +344,7 @@ type WorkspaceTreeEntry struct {
 // prs is a list. The embedded domain.Session.Metadata and domain.Session.PRs
 // fields are json:"-"; these curated fields are what serialize.
 type SessionView struct {
+	PromptExpired   bool   `json:"promptExpired,omitempty"`
 	ProviderProfile string `json:"providerProfile,omitempty"`
 	ProviderLabel   string `json:"providerLabel,omitempty"`
 	domain.Session
@@ -2675,6 +2676,7 @@ type CompactConversationResponse struct {
 
 // ConversationTurnResponse is one request and the work that followed it.
 type ConversationTurnResponse struct {
+	ContentExpired bool   `json:"contentExpired,omitempty"`
 	ID             string `json:"id"`
 	State          string `json:"state" enum:"queued,running,completed,recovered,interrupted,failed,cancelled"`
 	ProviderTurnID string `json:"providerTurnId,omitempty"`
@@ -2754,6 +2756,7 @@ type ConversationDiffFileResponse struct {
 
 // ConversationMessageResponse is one readable block of text.
 type ConversationMessageResponse struct {
+	ContentExpired    bool                                 `json:"contentExpired,omitempty"`
 	Kind              string                               `json:"kind" enum:"message"`
 	ID                string                               `json:"id"`
 	TurnID            string                               `json:"turnId,omitempty"`
@@ -2774,11 +2777,12 @@ type ConversationMessageResponse struct {
 
 // ConversationActivityResponse is one non-message timeline entry.
 type ConversationActivityResponse struct {
-	Kind     string `json:"kind" enum:"activity"`
-	ID       string `json:"id"`
-	TurnID   string `json:"turnId,omitempty"`
-	Sequence int64  `json:"sequence"`
-	Revision int64  `json:"revision"`
+	ContentExpired bool   `json:"contentExpired,omitempty"`
+	Kind           string `json:"kind" enum:"activity"`
+	ID             string `json:"id"`
+	TurnID         string `json:"turnId,omitempty"`
+	Sequence       int64  `json:"sequence"`
+	Revision       int64  `json:"revision"`
 	// ActivityKind discriminates the payload in Detail.
 	//
 	// mcp_tool is not command: an MCP call has a server, a tool name, structured

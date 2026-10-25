@@ -188,14 +188,14 @@ func (q *Queries) AdoptReviewProviderConversationTurn(ctx context.Context, arg A
 
 const appendConversationActivityOutput = `-- name: AppendConversationActivityOutput :execrows
 UPDATE conversation_activities
-SET command_output = substr(command_output || ?1, 1, ?2),
+SET command_output = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.command_output ELSE substr(command_output || ?1, 1, ?2) END,
     command_output_truncated = CASE
         WHEN length(command_output) + length(?1) > ?2 THEN 1
         ELSE command_output_truncated
     END,
     revision = revision + 1,
     updated_at = ?3
-WHERE conversation_id = ?4
+WHERE conversation_activities.conversation_id = ?4
   AND provider_item_id = ?5
   AND status <> 'cancelled'
   AND command_output_truncated = 0
@@ -245,14 +245,14 @@ func (q *Queries) AppendConversationActivityOutput(ctx context.Context, arg Appe
 
 const appendConversationActivityStreamedText = `-- name: AppendConversationActivityStreamedText :execrows
 UPDATE conversation_activities
-SET streamed_text = substr(streamed_text || ?1, 1, ?2),
+SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE substr(streamed_text || ?1, 1, ?2) END,
     streamed_text_truncated = CASE
         WHEN length(streamed_text) + length(?1) > ?2 THEN 1
         ELSE streamed_text_truncated
     END,
     revision = revision + 1,
     updated_at = ?3
-WHERE conversation_id = ?4
+WHERE conversation_activities.conversation_id = ?4
   AND provider_item_id = ?5
   AND status <> 'cancelled'
   AND streamed_text_truncated = 0
@@ -297,8 +297,8 @@ func (q *Queries) AppendConversationActivityStreamedText(ctx context.Context, ar
 
 const appendConversationMessageDelta = `-- name: AppendConversationMessageDelta :exec
 UPDATE conversation_messages
-SET text = text || ?, revision = revision + 1, streaming = 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ?
+SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE text || ? END, revision = revision + 1, streaming = 1, updated_at = ?
+WHERE conversation_messages.conversation_id = ? AND provider_item_id = ?
 `
 
 type AppendConversationMessageDeltaParams struct {
@@ -769,8 +769,8 @@ func (q *Queries) FailRolledBackConversationApprovals(ctx context.Context, arg F
 const finalizeConversationPlanActivity = `-- name: FinalizeConversationPlanActivity :exec
 UPDATE conversation_activities
 SET status = 'completed',
-    summary = ?1,
-    detail_json = ?2,
+    summary = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.summary ELSE ?1 END,
+    detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE ?2 END,
     revision = revision + 1,
     updated_at = ?3
 WHERE conversation_activities.conversation_id = ?4
@@ -1734,10 +1734,10 @@ func (q *Queries) ResetConversationAgentOverridesForSession(ctx context.Context,
 const resolveConversationApproval = `-- name: ResolveConversationApproval :exec
 UPDATE conversation_activities
 SET status = 'resolved',
-    detail_json = json_patch(detail_json, CAST(?1 AS TEXT)),
+    detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE json_patch(detail_json, CAST(?1 AS TEXT)) END,
     revision = revision + 1,
     updated_at = ?2
-WHERE conversation_id = ?3
+WHERE conversation_activities.conversation_id = ?3
   AND request_id = ?4
   AND status = 'pending'
 `
@@ -1804,9 +1804,9 @@ func (q *Queries) RestoreRecoveredChatActivity(ctx context.Context, arg RestoreR
 
 const restoreTransportFailedConversationTurn = `-- name: RestoreTransportFailedConversationTurn :execrows
 UPDATE conversation_turns
-SET state = 'running', error_message = '', completed_at = NULL,
+SET state = 'running', error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE '' END, completed_at = NULL,
     controller_generation = ?1
-WHERE id = ?2 AND conversation_id = ?3
+WHERE id = ?2 AND conversation_turns.conversation_id = ?3
   AND branch_id = ?4
   AND state = 'failed' AND rolled_back_at IS NULL
   AND error_message = 'controller ended before the turn completed'
@@ -3993,8 +3993,8 @@ func (q *Queries) SelectVerifiedAuthenticationTurn(ctx context.Context, arg Sele
 
 const settleConversationActivity = `-- name: SettleConversationActivity :exec
 UPDATE conversation_activities
-SET status = ?, summary = ?, detail_json = ?, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled'
+SET status = ?, summary = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.summary ELSE ? END, detail_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity') AND object_id=conversation_activities.id) THEN conversation_activities.detail_json ELSE ? END, revision = revision + 1, updated_at = ?
+WHERE conversation_activities.conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled'
 `
 
 type SettleConversationActivityParams struct {
@@ -4023,8 +4023,8 @@ func (q *Queries) SettleConversationActivity(ctx context.Context, arg SettleConv
 
 const settleConversationActivityStreamedText = `-- name: SettleConversationActivityStreamedText :execrows
 UPDATE conversation_activities
-SET streamed_text = ?, streamed_text_truncated = 0, revision = revision + 1, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled'
+SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE ? END, streamed_text_truncated = 0, revision = revision + 1, updated_at = ?
+WHERE conversation_activities.conversation_id = ? AND provider_item_id = ? AND provider_item_id <> '' AND status <> 'cancelled'
 `
 
 type SettleConversationActivityStreamedTextParams struct {
@@ -4058,8 +4058,8 @@ func (q *Queries) SettleConversationActivityStreamedText(ctx context.Context, ar
 
 const settleConversationMessage = `-- name: SettleConversationMessage :exec
 UPDATE conversation_messages
-SET text = ?, revision = revision + 1, streaming = 0, updated_at = ?
-WHERE conversation_id = ? AND provider_item_id = ?
+SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE ? END, revision = revision + 1, streaming = 0, updated_at = ?
+WHERE conversation_messages.conversation_id = ? AND provider_item_id = ?
 `
 
 type SettleConversationMessageParams struct {
@@ -4081,7 +4081,7 @@ func (q *Queries) SettleConversationMessage(ctx context.Context, arg SettleConve
 
 const settleConversationTurn = `-- name: SettleConversationTurn :exec
 UPDATE conversation_turns
-SET state = ?, error_message = ?, completed_at = COALESCE(completed_at, ?)
+SET state = ?, error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE ? END, completed_at = COALESCE(completed_at, ?)
 WHERE id = ?
 `
 
@@ -4105,7 +4105,7 @@ func (q *Queries) SettleConversationTurn(ctx context.Context, arg SettleConversa
 const settleOrphanedConversationTurns = `-- name: SettleOrphanedConversationTurns :exec
 UPDATE conversation_turns
 SET state = 'failed',
-    error_message = 'controller ended before the turn completed',
+    error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE 'controller ended before the turn completed' END,
     completed_at = ?
 WHERE handled_by_session_id = ? AND state IN ('queued', 'running')
 `
@@ -4126,7 +4126,7 @@ func (q *Queries) SettleOrphanedConversationTurns(ctx context.Context, arg Settl
 const settleOrphanedReviewTurns = `-- name: SettleOrphanedReviewTurns :exec
 UPDATE conversation_turns
 SET state = 'failed',
-    error_message = 'controller ended before the turn completed',
+    error_message = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.error_message ELSE 'controller ended before the turn completed' END,
     completed_at = ?1
 WHERE conversation_turns.conversation_id = ?2
   AND conversation_turns.handled_by_review_id = ?3
@@ -4380,8 +4380,8 @@ func (q *Queries) UpdateConversationThreadState(ctx context.Context, arg UpdateC
 
 const updateConversationTurnDiff = `-- name: UpdateConversationTurnDiff :execrows
 UPDATE conversation_turns
-SET diff_json = ?
-WHERE conversation_id = ? AND provider_turn_id = ?
+SET diff_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.diff_json ELSE ? END
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ?
 `
 
 type UpdateConversationTurnDiffParams struct {
@@ -4405,8 +4405,8 @@ func (q *Queries) UpdateConversationTurnDiff(ctx context.Context, arg UpdateConv
 
 const updateConversationTurnPlan = `-- name: UpdateConversationTurnPlan :execrows
 UPDATE conversation_turns
-SET plan_json = ?
-WHERE conversation_id = ? AND provider_turn_id = ?
+SET plan_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='turn') AND object_id=conversation_turns.id) THEN conversation_turns.plan_json ELSE ? END
+WHERE conversation_turns.conversation_id = ? AND provider_turn_id = ?
 `
 
 type UpdateConversationTurnPlanParams struct {
@@ -4513,9 +4513,9 @@ func (q *Queries) UpdateConversationUsage(ctx context.Context, arg UpdateConvers
 
 const updateQueuedConversationMessageText = `-- name: UpdateQueuedConversationMessageText :execrows
 UPDATE conversation_messages
-SET text = ?,
+SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE ? END,
     revision = revision + 1,
-    delivery_content_json = ?,
+    delivery_content_json = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.delivery_content_json ELSE ? END,
     updated_at = ?
 WHERE conversation_messages.conversation_id = ?
   AND conversation_messages.turn_id = ?

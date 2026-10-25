@@ -27,7 +27,7 @@ func (s *Store) RecoverLiveTransportTurn(ctx context.Context, conversationID str
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	var restored domain.ConversationTurn
-	err = s.inTx(ctx, "recover live transport turn", func(q *gen.Queries) error {
+	err = s.inTxDB(ctx, "recover live transport turn", func(q *gen.Queries, db gen.DBTX) error {
 		owner, err := q.GetSession(ctx, session)
 		if err != nil {
 			return err
@@ -89,7 +89,7 @@ func (s *Store) RecoverLiveTransportTurn(ctx context.Context, conversationID str
 			return errors.New("live turn recovery requires transport cleanup failure")
 		}
 		payload, _ := json.Marshal(map[string]any{"providerTurnId": turn.ProviderTurnID, "turnState": "running", "reason": "transport_cleanup_reconciled", "previousGeneration": turn.ControllerGeneration, "evidenceCount": len(eventIDs)})
-		projected, projectErr := projectProviderEventTx(ctx, q, conversationID, session, "", generation, "live-turn-recovery:"+turn.ID+":"+turn.CompletedAt.Time.UTC().Format(time.RFC3339Nano), "turn.transport_recovered", string(payload), now, func(txCtx context.Context) error {
+		projected, projectErr := projectProviderEventTx(ctx, q, db, conversationID, session, "", generation, "live-turn-recovery:"+turn.ID+":"+turn.CompletedAt.Time.UTC().Format(time.RFC3339Nano), "turn.transport_recovered", string(payload), now, func(txCtx context.Context) error {
 			rows, err := q.RestoreTransportFailedConversationTurn(txCtx, gen.RestoreTransportFailedConversationTurnParams{Generation: generation, TurnID: turn.ID, ConversationID: conversationID, BranchID: conv.ActiveBranchID})
 			if err != nil {
 				return err

@@ -334,8 +334,7 @@ func (c *ConversationsController) editMessage(w http.ResponseWriter, r *http.Req
 		writeConversationEditError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, EditConversationMessageResponse{
-		SourceBranchID: result.SourceBranchID,
+	envelope.WriteJSON(w, http.StatusAccepted, EditConversationMessageResponse{SourceBranchID: result.SourceBranchID,
 		ActiveBranchID: result.ActiveBranchID,
 		TurnID:         result.Turn.ID,
 		ProviderTurnID: result.Turn.ProviderTurnID,
@@ -368,6 +367,8 @@ func (c *ConversationsController) retryTurn(w http.ResponseWriter, r *http.Reque
 // writeConversationRetryError maps retry refusals to their HTTP meanings.
 func writeConversationRetryError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, domain.ErrHistoryContentExpired):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "CHAT_HISTORY_CONTENT_EXPIRED", "This history content has expired; submit a new prompt.", nil)
 	case errors.Is(err, chatsvc.ErrTurnNotRetryable):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict",
 			"CHAT_RETRY_NOT_RETRYABLE",
@@ -436,6 +437,8 @@ func (c *ConversationsController) activateBranch(w http.ResponseWriter, r *http.
 
 func writeConversationEditError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, domain.ErrHistoryContentExpired):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "CHAT_HISTORY_CONTENT_EXPIRED", "This history content has expired; submit a new prompt.", nil)
 	case errors.Is(err, chatsvc.ErrEditDeliveryUncertain):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict",
 			"CHAT_EDIT_UNCERTAIN",
@@ -970,6 +973,8 @@ func decodeConversationBody(w http.ResponseWriter, r *http.Request, into any) bo
 // codes, so a client can tell a permanent answer from a retryable one.
 func writeConversationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, domain.ErrHistoryContentExpired):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "CHAT_HISTORY_CONTENT_EXPIRED", "This history content has expired; submit a new prompt.", nil)
 	case errors.Is(err, ports.ErrSessionNotFound):
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found",
 			"SESSION_NOT_FOUND", "session not found", nil)
@@ -1143,7 +1148,7 @@ func conversationSnapshotResponse(s chatsvc.Snapshot) ConversationSnapshotRespon
 
 	for _, turn := range s.Turns {
 		out.Turns = append(out.Turns, ConversationTurnResponse{
-			ID:              turn.ID,
+			ContentExpired: turn.ContentExpired, ID: turn.ID,
 			State:           string(turn.State),
 			ProviderTurnID:  turn.ProviderTurnID,
 			RetryOfTurnID:   turn.RetryOfTurnID,
@@ -1160,6 +1165,7 @@ func conversationSnapshotResponse(s chatsvc.Snapshot) ConversationSnapshotRespon
 
 	for _, msg := range s.Messages {
 		message := ConversationMessageResponse{
+			ContentExpired:    msg.ContentExpired,
 			Kind:              "message",
 			ID:                msg.ID,
 			TurnID:            msg.TurnID,
@@ -1175,7 +1181,7 @@ func conversationSnapshotResponse(s chatsvc.Snapshot) ConversationSnapshotRespon
 			CreatedAt:         msg.CreatedAt.UTC().Format(time.RFC3339),
 		}
 		message.Content, message.EditAvailable = conversationContentSummary(msg)
-		message.EditAvailable = message.EditAvailable && msg.Sequence > s.EditFloorSequence
+		message.EditAvailable = message.EditAvailable && !msg.ContentExpired && msg.Sequence > s.EditFloorSequence
 		out.Messages = append(out.Messages, message)
 	}
 	for _, point := range s.BranchPoints {
@@ -1187,7 +1193,7 @@ func conversationSnapshotResponse(s chatsvc.Snapshot) ConversationSnapshotRespon
 
 	for _, activity := range s.Activities {
 		out.Activities = append(out.Activities, ConversationActivityResponse{
-			Kind:           "activity",
+			ContentExpired: activity.ContentExpired, Kind: "activity",
 			ID:             activity.ID,
 			TurnID:         activity.TurnID,
 			Sequence:       activity.Sequence,

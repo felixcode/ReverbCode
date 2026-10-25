@@ -150,6 +150,19 @@ type AgentSwitchFailureReceipt struct {
 	RetainUntil             sql.NullTime
 }
 
+type AoHistoryRetention struct {
+	ObjectKind     string
+	ObjectID       string
+	ConversationID string
+	SemanticSha256 string
+	PromptSha256   string
+	OriginalBytes  int64
+	OriginalSha256 string
+	ExpiredAt      string
+	CutoffAt       string
+	FieldsJson     string
+}
+
 type AppSetting struct {
 	ID                 int64
 	DefaultSessionMode domain.SessionMode

@@ -10988,6 +10988,8 @@ components:
           type: string
         projectId:
           type: string
+        promptExpired:
+          type: boolean
         providerLabel:
           type: string
         providerProfile:
@@ -11179,6 +11181,8 @@ components:
           - auto_review
           - user_input
           type: string
+        contentExpired:
+          type: boolean
         createdAt:
           type: string
         detail:
@@ -11384,6 +11388,8 @@ components:
           items:
             $ref: '#/components/schemas/ConversationContentSummaryResponse'
           type: array
+        contentExpired:
+          type: boolean
         createdAt:
           type: string
         editAvailable:
@@ -11710,6 +11716,8 @@ components:
           type:
           - "null"
           - string
+        contentExpired:
+          type: boolean
         diff:
           $ref: '#/components/schemas/ConversationTurnDiffResponse'
         errorMessage:
