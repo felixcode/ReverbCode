@@ -839,3 +839,6 @@ const (
 	ConversationSteerRejectedByProvider          ConversationSteerRejectionKind = "provider_refused"
 	ConversationSteerRejectedInterfaceTransition ConversationSteerRejectionKind = "interface_transition"
 )
+
+// ErrHistoryContentExpired refuses replay or edits that would use a retained stub.
+var ErrHistoryContentExpired = errors.New("conversation content has expired; submit a new prompt")

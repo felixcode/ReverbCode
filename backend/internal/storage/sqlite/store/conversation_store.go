@@ -659,6 +659,8 @@ func (s *Store) ConversationEditAnchor(
 	ctx context.Context,
 	conversationID, replacedTurnID string,
 ) (domain.ConversationEditAnchor, error) {
+ var expired bool
+ if err:=s.readDB.QueryRowContext(ctx,`SELECT EXISTS(SELECT 1 FROM ao_history_retention r LEFT JOIN conversation_messages m ON r.object_kind='message' AND r.object_id=m.id WHERE r.conversation_id=? AND ((r.object_kind='turn' AND r.object_id=?) OR (m.turn_id=? AND m.role='user')))`,conversationID,replacedTurnID,replacedTurnID).Scan(&expired);err!=nil{return domain.ConversationEditAnchor{},err};if expired{return domain.ConversationEditAnchor{},domain.ErrHistoryContentExpired}
 	row, err := s.qr.SelectConversationEditAnchor(ctx, gen.SelectConversationEditAnchorParams{
 		ConversationID: conversationID,
 		ReplacedTurnID: nullableString(replacedTurnID),
@@ -3812,7 +3814,7 @@ func (s *Store) RetryPrompt(ctx context.Context, conversationID, turnID string) 
 		return domain.RetryPrompt{}, err
 	}
 	if expired {
-		return domain.RetryPrompt{}, errors.New("conversation prompt content has expired; submit a new prompt")
+		return domain.RetryPrompt{}, domain.ErrHistoryContentExpired
 	}
 
 	row, err := s.qr.SelectRetryableConversationPrompt(ctx, gen.SelectRetryableConversationPromptParams{

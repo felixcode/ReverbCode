@@ -1530,7 +1530,7 @@ func (c *Controller) RetryTurn(ctx context.Context, turnID string) (domain.Conve
 
 	prompt, err := c.store.RetryPrompt(ctx, c.conversation.ID, turnID)
 	if err != nil {
-		return domain.ConversationTurn{}, fmt.Errorf("%w: %s", ErrTurnNotRetryable, turnID)
+		return domain.ConversationTurn{}, fmt.Errorf("%w: %w", ErrTurnNotRetryable, err)
 	}
 	if !prompt.ActiveLineage {
 		return domain.ConversationTurn{}, fmt.Errorf("%w: %s", ErrRetryStaleBranch, turnID)

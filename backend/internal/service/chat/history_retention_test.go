@@ -42,3 +42,8 @@ func TestRetentionActivityDigestAndHighWater(t *testing.T) {
 		t.Fatalf("expired highwater rejected valid original replay: %v", got)
 	}
 }
+
+func TestRetentionApproximateReplayRejectsExpiredStub(t *testing.T) {
+ _,_,err:=buildApproximateReplayContext([]domain.ConversationMessage{{Sequence:1,Role:domain.MessageRoleUser,Text:"[AO history expired]",ContentExpired:true}},0,1)
+ if err!=domain.ErrHistoryContentExpired{t.Fatalf("expired stub became replay context: %v",err)}
+}

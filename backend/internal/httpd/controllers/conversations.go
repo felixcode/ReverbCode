@@ -367,6 +367,8 @@ func (c *ConversationsController) retryTurn(w http.ResponseWriter, r *http.Reque
 // writeConversationRetryError maps retry refusals to their HTTP meanings.
 func writeConversationRetryError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+ case errors.Is(err,domain.ErrHistoryContentExpired):
+ envelope.WriteAPIError(w,r,http.StatusConflict,"conflict","CHAT_HISTORY_CONTENT_EXPIRED","This history content has expired; submit a new prompt.",nil)
 	case errors.Is(err, chatsvc.ErrTurnNotRetryable):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict",
 			"CHAT_RETRY_NOT_RETRYABLE",
@@ -435,6 +437,8 @@ func (c *ConversationsController) activateBranch(w http.ResponseWriter, r *http.
 
 func writeConversationEditError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+ case errors.Is(err,domain.ErrHistoryContentExpired):
+ envelope.WriteAPIError(w,r,http.StatusConflict,"conflict","CHAT_HISTORY_CONTENT_EXPIRED","This history content has expired; submit a new prompt.",nil)
 	case errors.Is(err, chatsvc.ErrEditDeliveryUncertain):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict",
 			"CHAT_EDIT_UNCERTAIN",
@@ -969,6 +973,8 @@ func decodeConversationBody(w http.ResponseWriter, r *http.Request, into any) bo
 // codes, so a client can tell a permanent answer from a retryable one.
 func writeConversationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+ case errors.Is(err,domain.ErrHistoryContentExpired):
+ envelope.WriteAPIError(w,r,http.StatusConflict,"conflict","CHAT_HISTORY_CONTENT_EXPIRED","This history content has expired; submit a new prompt.",nil)
 	case errors.Is(err, ports.ErrSessionNotFound):
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found",
 			"SESSION_NOT_FOUND", "session not found", nil)
