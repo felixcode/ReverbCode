@@ -1058,14 +1058,35 @@ UPDATE conversation_messages
 SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE text || ? END, revision = revision + 1, streaming = 1, updated_at = ?
 WHERE conversation_messages.conversation_id = ? AND provider_item_id = ?;
 
+-- Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+-- the original query above, including matching more than one legacy row.
+-- name: AppendConversationMessageDeltaNonempty :exec
+UPDATE conversation_messages
+SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE text || ? END, revision = revision + 1, streaming = 1, updated_at = ?
+WHERE conversation_messages.conversation_id = ? AND provider_item_id <> '' AND provider_item_id = ?;
+
 -- name: SettleConversationMessage :exec
 UPDATE conversation_messages
 SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE ? END, revision = revision + 1, streaming = 0, updated_at = ?
 WHERE conversation_messages.conversation_id = ? AND provider_item_id = ?;
 
+-- Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+-- the original query above, including matching more than one legacy row.
+-- name: SettleConversationMessageNonempty :exec
+UPDATE conversation_messages
+SET text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='message') AND object_id=conversation_messages.id) THEN conversation_messages.text ELSE ? END, revision = revision + 1, streaming = 0, updated_at = ?
+WHERE conversation_messages.conversation_id = ? AND provider_item_id <> '' AND provider_item_id = ?;
+
 -- name: SelectConversationMessageByProviderItem :one
 SELECT * FROM conversation_messages
 WHERE conversation_id = ? AND provider_item_id = ?
+LIMIT 1;
+
+-- Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+-- the original query above, including matching more than one legacy row.
+-- name: SelectConversationMessageByProviderItemNonempty :one
+SELECT * FROM conversation_messages
+WHERE conversation_id = ? AND provider_item_id <> '' AND provider_item_id = ?
 LIMIT 1;
 
 -- name: SelectConversationMessageByClientID :one
@@ -1275,6 +1296,22 @@ WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
   AND status <> 'cancelled'
   AND command_output_truncated = 0;
 
+-- Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+-- the original query above, including matching more than one legacy row.
+-- name: AppendConversationActivityOutputNonempty :execrows
+UPDATE conversation_activities
+SET command_output = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.command_output ELSE substr(command_output || sqlc.arg(delta), 1, sqlc.arg(max_output_chars)) END,
+    command_output_truncated = CASE
+        WHEN length(command_output) + length(sqlc.arg(delta)) > sqlc.arg(max_output_chars) THEN 1
+        ELSE command_output_truncated
+    END,
+    revision = revision + 1,
+    updated_at = sqlc.arg(updated_at)
+WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
+  AND provider_item_id <> '' AND provider_item_id = sqlc.arg(provider_item_id)
+  AND status <> 'cancelled'
+  AND command_output_truncated = 0;
+
 -- Append provider prose streamed for one activity, capped in one statement.
 --
 -- Same shape and same reasoning as AppendConversationActivityOutput, against a
@@ -1304,6 +1341,22 @@ WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
   AND status <> 'cancelled'
   AND streamed_text_truncated = 0;
 
+-- Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+-- the original query above, including matching more than one legacy row.
+-- name: AppendConversationActivityStreamedTextNonempty :execrows
+UPDATE conversation_activities
+SET streamed_text = CASE WHEN EXISTS(SELECT 1 FROM ao_history_retention WHERE (object_kind='activity' OR object_kind='activity_output') AND object_id=conversation_activities.id) THEN conversation_activities.streamed_text ELSE substr(streamed_text || sqlc.arg(delta), 1, sqlc.arg(max_text_chars)) END,
+    streamed_text_truncated = CASE
+        WHEN length(streamed_text) + length(sqlc.arg(delta)) > sqlc.arg(max_text_chars) THEN 1
+        ELSE streamed_text_truncated
+    END,
+    revision = revision + 1,
+    updated_at = sqlc.arg(updated_at)
+WHERE conversation_activities.conversation_id = sqlc.arg(conversation_id)
+  AND provider_item_id <> '' AND provider_item_id = sqlc.arg(provider_item_id)
+  AND status <> 'cancelled'
+  AND streamed_text_truncated = 0;
+
 -- A capped delta is still associated with a real activity. Append callers use
 -- this probe to distinguish that harmless no-op from the ordinary provider race
 -- where output arrives before item/started creates the activity.
@@ -1313,6 +1366,17 @@ SELECT EXISTS(
     FROM conversation_activities
     WHERE conversation_id = sqlc.arg(conversation_id)
       AND provider_item_id = sqlc.arg(provider_item_id)
+      AND status <> 'cancelled'
+);
+
+-- Nonempty IDs can seek the existing unique partial index. Empty IDs retain
+-- the original query above, including matching more than one legacy row.
+-- name: ConversationActivityExistsForProviderItemNonempty :one
+SELECT EXISTS(
+    SELECT 1
+    FROM conversation_activities
+    WHERE conversation_id = sqlc.arg(conversation_id)
+      AND provider_item_id <> '' AND provider_item_id = sqlc.arg(provider_item_id)
       AND status <> 'cancelled'
 );
 
@@ -1352,6 +1416,7 @@ SELECT CAST(COALESCE(MAX(sequence), 0) AS INTEGER) AS sequence
 FROM conversation_activities
 WHERE conversation_id = ?
   AND kind = 'system'
+  AND provider_item_id <> ''
   AND provider_item_id = ?;
 
 -- Activities the agent still remembers, filtered the same way messages are and for

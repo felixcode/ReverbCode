@@ -2022,7 +2022,7 @@ func (s *Store) AppendActivityStreamedText(
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
 
-	rows, err := q.AppendConversationActivityStreamedText(ctx,
+	rows, err := providerItemAppendConversationActivityStreamedText(ctx, q,
 		gen.AppendConversationActivityStreamedTextParams{
 			Delta:          delta,
 			MaxTextChars:   MaxStreamedTextChars,
@@ -2036,7 +2036,7 @@ func (s *Store) AppendActivityStreamedText(
 	if rows > 0 {
 		return true, nil
 	}
-	found, err := q.ConversationActivityExistsForProviderItem(ctx,
+	found, err := providerItemConversationActivityExistsForProviderItem(ctx, q,
 		gen.ConversationActivityExistsForProviderItemParams{
 			ConversationID: conversationID,
 			ProviderItemID: providerItemID,
@@ -2430,14 +2430,14 @@ func (s *Store) AppendAssistantDelta(
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
 
-	_, err := q.SelectConversationMessageByProviderItem(ctx,
+	_, err := providerItemSelectConversationMessageByProviderItem(ctx, q,
 		gen.SelectConversationMessageByProviderItemParams{
 			ConversationID: conversationID,
 			ProviderItemID: providerItemID,
 		})
 	switch {
 	case err == nil:
-		if appendErr := q.AppendConversationMessageDelta(ctx,
+		if appendErr := providerItemAppendConversationMessageDelta(ctx, q,
 			gen.AppendConversationMessageDeltaParams{
 				Text:           delta,
 				UpdatedAt:      now,
@@ -2488,7 +2488,7 @@ func (s *Store) SettleAssistantMessage(
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
 
-	_, err := q.SelectConversationMessageByProviderItem(ctx,
+	_, err := providerItemSelectConversationMessageByProviderItem(ctx, q,
 		gen.SelectConversationMessageByProviderItemParams{
 			ConversationID: conversationID,
 			ProviderItemID: providerItemID,
@@ -2523,7 +2523,7 @@ func (s *Store) SettleAssistantMessage(
 		return fmt.Errorf("lookup message %s: %w", providerItemID, err)
 	}
 
-	if err := q.SettleConversationMessage(ctx, gen.SettleConversationMessageParams{
+	if err := providerItemSettleConversationMessage(ctx, q, gen.SettleConversationMessageParams{
 		Text:           text,
 		UpdatedAt:      now,
 		ConversationID: conversationID,
@@ -2644,7 +2644,7 @@ func (s *Store) AppendCommandOutput(
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
 
-	rows, err := q.AppendConversationActivityOutput(ctx,
+	rows, err := providerItemAppendConversationActivityOutput(ctx, q,
 		gen.AppendConversationActivityOutputParams{
 			Delta:          delta,
 			MaxOutputChars: MaxCommandOutputChars,
@@ -2658,7 +2658,7 @@ func (s *Store) AppendCommandOutput(
 	if rows > 0 {
 		return true, nil
 	}
-	found, err := q.ConversationActivityExistsForProviderItem(ctx,
+	found, err := providerItemConversationActivityExistsForProviderItem(ctx, q,
 		gen.ConversationActivityExistsForProviderItemParams{
 			ConversationID: conversationID,
 			ProviderItemID: providerItemID,

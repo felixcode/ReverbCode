@@ -66,6 +66,7 @@ CREATE UNIQUE INDEX idx_conversation_activities_provider_item
 CREATE INDEX idx_conversation_activities_order ON conversation_activities(conversation_id, sequence);
 CREATE INDEX idx_conversation_activities_pending ON conversation_activities(conversation_id, kind, status);
 CREATE INDEX idx_conversation_activities_branch ON conversation_activities(branch_id, sequence);
+CREATE TABLE ao_history_retention(object_kind TEXT, object_id TEXT, PRIMARY KEY(object_kind, object_id));
 CREATE TABLE changes(activity_id TEXT, revision INTEGER, updated_at INTEGER);
 CREATE TRIGGER activity_revision_update AFTER UPDATE ON conversation_activities
  WHEN OLD.revision <> NEW.revision BEGIN
@@ -236,9 +237,16 @@ func TestActivitySettlementReplayUsesProviderItemIndex(t *testing.T) {
 				}
 				// Count candidate visits without wrapping either indexed key, so the
 				// real predicates and partial-index eligibility remain intact.
-				lookup = strings.Replace(lookup, "WHERE conversation_id = ?", "WHERE conversation_id = ? AND activity_candidate_probe(1) = 1", 1)
-				settle = strings.Replace(settle, "WHERE conversation_id = ?", "WHERE conversation_id = ? AND activity_candidate_probe(1) = 1", 1)
-				stream = strings.Replace(stream, "WHERE conversation_id = ?", "WHERE conversation_id = ? AND activity_candidate_probe(1) = 1", 1)
+				instrument := func(query string) string {
+					for _, prefix := range []string{"WHERE conversation_id = ?", "WHERE conversation_activities.conversation_id = ?"} {
+						if strings.Contains(query, prefix) {
+							return strings.Replace(query, prefix, prefix+" AND activity_candidate_probe(1) = 1", 1)
+						}
+					}
+					t.Fatal("activity probe did not match the source predicate")
+					return query
+				}
+				lookup, settle, stream = instrument(lookup), instrument(settle), instrument(stream)
 				activityCandidateProbe.calls.Store(0)
 				for i := range size {
 					item := fmt.Sprintf("item-%d", i)
