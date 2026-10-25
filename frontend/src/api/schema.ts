@@ -588,6 +588,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dev/sessions/{sessionId}/preserved-queue/recover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recover exact transport-cleanup queue rows without replaying user input (local listener only) */
+        post: operations["recoverPreservedSessionQueue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/endpoints": {
         parameters: {
             query?: never;
@@ -4589,6 +4606,37 @@ export interface components {
             ok: boolean;
             taskPreparation?: string;
         };
+        PreservedQueueInputProof: {
+            clientMessageId: string;
+            clientPayloadHash: string;
+            deliverySha256: string;
+            id: string;
+            textSha256: string;
+        };
+        PreservedQueueRecoveryRequest: {
+            beforeSnapshotSha256: string;
+            boundProviderTurnId: string;
+            boundTurnId: string;
+            branchId: string;
+            conversationId: string;
+            failureAt: string;
+            nativeId: string;
+            protocol: number;
+            turns: components["schemas"]["PreservedQueueTurnProof"][];
+        };
+        PreservedQueueRecoveryResponse: {
+            dispatch: string;
+            previouslyRestored: number;
+            requestSha256: string;
+            restored: number;
+        };
+        PreservedQueueTurnProof: {
+            beforeState: string;
+            id: string;
+            inputs: components["schemas"]["PreservedQueueInputProof"][];
+            previousGeneration: string;
+            requestedAt: string;
+        };
         PreviewServerStatusResponse: {
             configuration?: string;
             error?: string;
@@ -7889,6 +7937,69 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    recoverPreservedSessionQueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreservedQueueRecoveryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreservedQueueRecoveryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

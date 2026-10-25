@@ -85,6 +85,7 @@ type ConversationsController struct {
 
 // Register mounts the conversation routes under a session.
 func (c *ConversationsController) Register(r chi.Router) {
+	r.Post("/dev/sessions/{sessionId}/preserved-queue/recover", c.recoverPreservedQueue)
 	r.Post("/sessions/{sessionId}/chat-view", c.setChatView)
 	r.Get("/sessions/{sessionId}/conversation", c.snapshot)
 	r.Post("/sessions/{sessionId}/conversation/messages", c.send)

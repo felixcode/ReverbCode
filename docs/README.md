@@ -45,3 +45,5 @@ Persist durable facts, derive display status:
 - derived read model: `service.Session` computes display status from session + PR facts
 
 - [Expired AO history compatibility](operations/history-retention-compat.md): digest-aware replay and deployment/rollback boundaries.
+
+- [Exact preserved-queue recovery](operations/preserved-queue-recovery.md): local-only maintenance for explicitly proven transport-cleanup batches.
