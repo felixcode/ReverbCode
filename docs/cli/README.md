@@ -339,3 +339,5 @@ NULL configs retain their defaults. No Git discovery runs during migration, and
 no earlier migration is modified. Downgrading preserves config data; older
 versions do not support canonical claims and may drop this field when saving
 project settings.
+
+`ao session recover-preserved-queue <session-id> --request /private/request.json` posts metadata to the local-only maintenance endpoint; see [the recovery contract](../operations/preserved-queue-recovery.md). Original turns and inputs are retained.

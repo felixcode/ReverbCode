@@ -20,8 +20,10 @@ func queueProofHash(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 func preservedQueueFixture(t *testing.T, counts ...int) (*sqlite.Store, *sql.DB, domain.SessionID, domain.PreservedQueueRecoveryRequest) {
- count:=2
- if len(counts)>0 {count=counts[0]}
+	count := 2
+	if len(counts) > 0 {
+		count = counts[0]
+	}
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -33,7 +35,7 @@ func preservedQueueFixture(t *testing.T, counts ...int) (*sqlite.Store, *sql.DB,
 	seedProject(t, s, "restore")
 	rec := sampleRecord("restore")
 	rec.Mode = domain.SessionModeChat
- rec.Harness = domain.HarnessClaudeCode
+	rec.Harness = domain.HarnessClaudeCode
 	session, err := s.CreateSession(ctx, rec)
 	if err != nil {
 		t.Fatal(err)
@@ -219,15 +221,29 @@ func TestPreservedQueueRecoveryRequiresExactTerminalArchive(t *testing.T) {
 	}
 }
 
-func TestPreservedQueueRecoveryFull103WithLegacyClients(t *testing.T){
- s,db,session,req:=preservedQueueFixture(t,103)
- empty:=0;for _,turn:=range req.Turns{if turn.Inputs[0].ClientMessageID==""{empty++}}
- if len(req.Turns)!=103 || empty!=68{t.Fatal("fixture mixture drift")}
- result,err:=s.RestorePreservedQueue(context.Background(),session,"new-generation",req,nil,histClock.Add(time.Hour));if err!=nil{t.Fatal(err)}
- if result.Restored!=103{t.Fatal("not whole batch")}
- var turns,messages,queued int
- db.QueryRow(`SELECT count(*) FROM conversation_turns`).Scan(&turns)
- db.QueryRow(`SELECT count(*) FROM conversation_messages`).Scan(&messages)
- db.QueryRow(`SELECT count(*) FROM conversation_turns WHERE state='queued'`).Scan(&queued)
- if turns!=104 || messages!=103 || queued!=103{t.Fatal("IDs/inputs changed")}
+func TestPreservedQueueRecoveryFull103WithLegacyClients(t *testing.T) {
+	s, db, session, req := preservedQueueFixture(t, 103)
+	empty := 0
+	for _, turn := range req.Turns {
+		if turn.Inputs[0].ClientMessageID == "" {
+			empty++
+		}
+	}
+	if len(req.Turns) != 103 || empty != 68 {
+		t.Fatal("fixture mixture drift")
+	}
+	result, err := s.RestorePreservedQueue(context.Background(), session, "new-generation", req, nil, histClock.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Restored != 103 {
+		t.Fatal("not whole batch")
+	}
+	var turns, messages, queued int
+	db.QueryRow(`SELECT count(*) FROM conversation_turns`).Scan(&turns)
+	db.QueryRow(`SELECT count(*) FROM conversation_messages`).Scan(&messages)
+	db.QueryRow(`SELECT count(*) FROM conversation_turns WHERE state='queued'`).Scan(&queued)
+	if turns != 104 || messages != 103 || queued != 103 {
+		t.Fatal("IDs/inputs changed")
+	}
 }

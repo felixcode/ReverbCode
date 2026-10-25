@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
- "strings"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -114,15 +114,39 @@ func (s *Store) RestorePreservedQueue(ctx context.Context, session domain.Sessio
 			return domain.ErrPreservedQueueRecovery
 		}
 		// Validate the complete batch before any lifecycle row is changed.
-        // Check reverse references and membership once for the whole batch;
-        // never rescan a large conversation once per original queued item.
-        slots:=strings.TrimSuffix(strings.Repeat("?,",len(req.Turns)),",")
-        ids:=make([]any,0,len(req.Turns));for _,candidate:=range req.Turns{ids=append(ids,candidate.ID)}
-        var referenced bool
-        if err=db.QueryRowContext(ctx,`SELECT EXISTS(SELECT 1 FROM conversation_turns WHERE retry_of_turn_id IN (`+slots+`) OR promoted_to_turn_id IN (`+slots+`))`,append(append([]any{},ids...),ids...)...).Scan(&referenced);err!=nil{return err};if referenced{return domain.ErrPreservedQueueRecovery}
-        counts:=map[string]int{}
-        membership,err:=db.QueryContext(ctx,`SELECT turn_id,count(*) FROM conversation_messages WHERE conversation_id=? AND turn_id IN (`+slots+`) GROUP BY turn_id`,append([]any{req.ConversationID},ids...)...);if err!=nil{return err}
-        for membership.Next(){var id string;var count int;if err=membership.Scan(&id,&count);err!=nil{membership.Close();return err};counts[id]=count};err=membership.Err();membership.Close();if err!=nil{return err}
+		// Check reverse references and membership once for the whole batch;
+		// never rescan a large conversation once per original queued item.
+		slots := strings.TrimSuffix(strings.Repeat("?,", len(req.Turns)), ",")
+		ids := make([]any, 0, len(req.Turns))
+		for _, candidate := range req.Turns {
+			ids = append(ids, candidate.ID)
+		}
+		var referenced bool
+		if err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversation_turns WHERE retry_of_turn_id IN (`+slots+`) OR promoted_to_turn_id IN (`+slots+`))`, append(append([]any{}, ids...), ids...)...).Scan(&referenced); err != nil {
+			return err
+		}
+		if referenced {
+			return domain.ErrPreservedQueueRecovery
+		}
+		counts := map[string]int{}
+		membership, err := db.QueryContext(ctx, `SELECT turn_id,count(*) FROM conversation_messages WHERE conversation_id=? AND turn_id IN (`+slots+`) GROUP BY turn_id`, append([]any{req.ConversationID}, ids...)...)
+		if err != nil {
+			return err
+		}
+		for membership.Next() {
+			var id string
+			var count int
+			if err = membership.Scan(&id, &count); err != nil {
+				membership.Close()
+				return err
+			}
+			counts[id] = count
+		}
+		err = membership.Err()
+		membership.Close()
+		if err != nil {
+			return err
+		}
 		for _, candidate := range req.Turns {
 			var valid bool
 			err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversation_turns t WHERE id=? AND conversation_id=? AND handled_by_session_id=? AND handled_by_review_id IS NULL AND branch_id=? AND controller_generation=? AND state='failed' AND error_message=? AND CAST(completed_at AS TEXT)=? AND CAST(requested_at AS TEXT)=? AND started_at IS NULL AND provider_turn_id='' AND rolled_back_at IS NULL AND promotion_started_at IS NULL AND promoted_to_turn_id IS NULL AND retry_of_turn_id IS NULL AND NOT EXISTS(SELECT 1 FROM ao_history_retention r WHERE r.object_kind='turn' AND r.object_id=t.id))`, candidate.ID, req.ConversationID, session, req.BranchID, candidate.PreviousGeneration, queueCleanupFailure, req.FailureAt, candidate.RequestedAt).Scan(&valid)
@@ -132,9 +156,12 @@ func (s *Store) RestorePreservedQueue(ctx context.Context, session domain.Sessio
 			if !valid {
 				return domain.ErrPreservedQueueRecovery
 			}
-            inputSlots:=strings.TrimSuffix(strings.Repeat("?,",len(candidate.Inputs)),",")
-            inputArgs:=[]any{req.ConversationID,candidate.ID,req.BranchID};for _,input:=range candidate.Inputs{inputArgs=append(inputArgs,input.ID)}
-            rows,err:=db.QueryContext(ctx,`SELECT id,client_message_id,COALESCE(client_payload_hash,''),text,delivery_content_json FROM conversation_messages m WHERE conversation_id=? AND turn_id=? AND role='user' AND streaming=0 AND provider_item_id='' AND branch_id=? AND id IN (`+inputSlots+`) AND NOT EXISTS(SELECT 1 FROM ao_history_retention r WHERE r.object_kind='message' AND r.object_id=m.id)`,inputArgs...)
+			inputSlots := strings.TrimSuffix(strings.Repeat("?,", len(candidate.Inputs)), ",")
+			inputArgs := []any{req.ConversationID, candidate.ID, req.BranchID}
+			for _, input := range candidate.Inputs {
+				inputArgs = append(inputArgs, input.ID)
+			}
+			rows, err := db.QueryContext(ctx, `SELECT id,client_message_id,COALESCE(client_payload_hash,''),text,delivery_content_json FROM conversation_messages m WHERE conversation_id=? AND turn_id=? AND role='user' AND streaming=0 AND provider_item_id='' AND branch_id=? AND id IN (`+inputSlots+`) AND NOT EXISTS(SELECT 1 FROM ao_history_retention r WHERE r.object_kind='message' AND r.object_id=m.id)`, inputArgs...)
 			if err != nil {
 				return err
 			}
@@ -164,7 +191,7 @@ func (s *Store) RestorePreservedQueue(ctx context.Context, session domain.Sessio
 			if matched != len(expected) {
 				return domain.ErrPreservedQueueRecovery
 			}
-            if counts[candidate.ID] != matched {
+			if counts[candidate.ID] != matched {
 				return domain.ErrPreservedQueueRecovery
 			}
 		}
