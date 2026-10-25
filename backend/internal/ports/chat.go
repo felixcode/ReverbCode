@@ -1119,6 +1119,19 @@ type ChatProviderPreserver interface {
 	PreservesProviderOnClose() bool
 }
 
+// ChatDisconnectState is adapter-owned transport evidence, never provider input.
+type ChatDisconnectState string
+
+const (
+	ChatDisconnectNotPersistent ChatDisconnectState = "not_persistent"
+	ChatDisconnectPreserved     ChatDisconnectState = "preserved"
+	ChatDisconnectEnded         ChatDisconnectState = "ended"
+	ChatDisconnectUnknown       ChatDisconnectState = "unknown"
+)
+
+// ChatDisconnectObserver distinguishes connection loss from provider death.
+type ChatDisconnectObserver interface{ DisconnectedProviderState() ChatDisconnectState }
+
 // ChatProviderTerminator is optionally implemented when explicit session
 // destruction must do more than detach the controller.
 type ChatProviderTerminator interface {

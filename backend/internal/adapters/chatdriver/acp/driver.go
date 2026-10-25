@@ -667,7 +667,7 @@ func (d *Driver) connectProcess(
 	gate := newGatedReader(transport.Stdout, !transport.Reconnected)
 	proc := &process{
 		stdin: transport.Stdin, stdout: gate, gate: gate,
-		reconnected: transport.Reconnected, acpState: transport.ACPState, recoveryEvidence: transport.RecoveryEvidence,
+		reconnected: transport.Reconnected, acpState: transport.ACPState, recoveryEvidence: transport.RecoveryEvidence, disconnectState: transport.DisconnectState,
 	}
 	proc.stop = persistentStop(gate, transport.Stdin)
 	proc.terminate = persistentTerminate(gate, transport.Stdin, func(shutdownCtx context.Context) error {

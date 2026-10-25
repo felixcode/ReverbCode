@@ -8,7 +8,7 @@ func TestNotificationQueueOptions(t *testing.T) {
 		wantCapacity    int
 		wantBytes       int64
 	}{
-		{"", "", 16384, 16 * 1024 * 1024}, {"2048", "4194304", 2048, 4194304}, {"invalid", "-1", 16384, 16 * 1024 * 1024}, {"0", "0", 16384, 16 * 1024 * 1024},
+		{"", "", 16384, 16 * 1024 * 1024}, {"16384", "67108864", 16384, 64 * 1024 * 1024}, {"2048", "4194304", 2048, 4194304}, {"invalid", "-1", 16384, 16 * 1024 * 1024}, {"0", "0", 16384, 16 * 1024 * 1024},
 	} {
 		t.Run(tc.capacity+":"+tc.bytes, func(t *testing.T) {
 			t.Setenv("AO_ACP_NOTIFICATION_QUEUE_CAPACITY", tc.capacity)

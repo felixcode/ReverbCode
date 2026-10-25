@@ -257,6 +257,11 @@ type Controller struct {
 	// the closing controller from projecting a false provider exit or failing work
 	// that the detached host continues to run.
 	preserveProviderOnStop bool
+	terminateRequested     bool
+	terminateOnce          sync.Once
+	terminationErr         error
+	terminateCleanupOnce   sync.Once
+	terminateCleanupErr    error
 
 	// account, threadState and mcpServers are merged here before being written,
 	// because the provider reports each of them in pieces: account/updated carries
@@ -1451,6 +1456,9 @@ func (c *Controller) sendLocked(
 	msg ports.ChatUserMessage,
 	queueWhenBusy bool,
 ) (domain.ConversationTurn, error) {
+	if c.disconnectedDispatchBlocked(ctx) {
+		return domain.ConversationTurn{}, ErrNoController
+	}
 	if msg.ClientPayloadHash == "" {
 		var err error
 		msg.ClientPayloadHash, err = clientPayloadHash(msg)
@@ -1756,6 +1764,9 @@ func (c *Controller) dispatch(
 	msg ports.ChatUserMessage,
 	requestedAt time.Time,
 ) (domain.ConversationTurn, error) {
+	if c.disconnectedDispatchBlocked(ctx) {
+		return domain.ConversationTurn{}, ErrNoController
+	}
 	// Every dispatch carries the conversation's choices, including one AO makes on
 	// the user's behalf: a queued message draining, or a relay from `ao send`. A
 	// setting that only applied when the user pressed send would silently stop
@@ -1870,6 +1881,9 @@ func (c *Controller) drain(ctx context.Context) error {
 // allowDispatch gates sending the next queued turn. A pending Stop cutoff forces
 // it true so messages typed after Stop still send.
 func (c *Controller) drainLocked(ctx context.Context, allowDispatch bool) error {
+	if c.disconnectedDispatchBlocked(ctx) {
+		return nil
+	}
 	c.mu.Lock()
 	cutoff := c.cancelQueuedAt
 	c.cancelQueuedAt = time.Time{}
@@ -1923,7 +1937,8 @@ func (c *Controller) drainLocked(ctx context.Context, allowDispatch bool) error 
 		Origin:          queued.Origin,
 		ClientMessageID: queued.ClientMessageID,
 	}, c.now()); err != nil {
-		// dispatch already settled this turn as failed. Stopping here rather than
+		// A disconnected transport leaves this turn queued; provider errors settle
+		// it as failed. Stopping here rather than
 		// walking the rest of the queue: whatever broke the send is likely to break
 		// the next one too, and failing them all on one bad provider state would
 		// discard messages the user can otherwise still see waiting.
@@ -2555,22 +2570,61 @@ func (c *Controller) Close(ctx context.Context) error {
 // host. Daemon shutdown uses Close so the host survives; user/session teardown
 // and controller replacement use Terminate.
 func (c *Controller) Terminate(ctx context.Context) error {
-	c.once.Do(func() {
+	c.mu.Lock()
+	c.terminateRequested = true
+	c.preserveProviderOnStop = false
+	c.mu.Unlock()
+	c.terminateOnce.Do(func() {
 		if terminator, ok := c.conv.(ports.ChatProviderTerminator); ok {
-			c.closeErr = terminator.Terminate()
+			c.terminationErr = terminator.Terminate()
 		} else {
-			c.closeErr = c.conv.Close()
+			c.once.Do(func() { c.closeErr = c.conv.Close() })
+			c.terminationErr = c.closeErr
 		}
 	})
 	select {
 	case <-c.stopped:
-		return c.closeErr
+		c.terminateCleanupOnce.Do(func() { c.terminateCleanupErr = c.cleanupOwnedControllerWork(ctx, c.now()) })
+		return errors.Join(c.terminationErr, c.terminateCleanupErr)
 	case <-ctx.Done():
-		if c.closeErr != nil {
-			return errors.Join(c.closeErr, ctx.Err())
-		}
-		return ctx.Err()
+		return errors.Join(c.terminationErr, ctx.Err())
 	}
+}
+
+// Adapter-only disconnect evidence cannot be supplied by replay/HTTP payloads.
+func (c *Controller) preserveDisconnectedWork() bool {
+	observer, ok := c.conv.(ports.ChatDisconnectObserver)
+	if !ok {
+		return false
+	}
+	state := observer.DisconnectedProviderState()
+	if state != ports.ChatDisconnectPreserved && state != ports.ChatDisconnectUnknown {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminateRequested || c.preserveProviderOnStop {
+		return false
+	}
+	c.preserveProviderOnStop = true
+	c.log.Warn("persistent transport disconnected; work retained", "session", c.sessionID, "provider_state", state)
+	return true
+}
+
+// All callers hold sendMu. A buffered terminal event may reach drain before
+// Stopped/EOF, so no queue mutation or provider preparation may precede this gate.
+func (c *Controller) disconnectedDispatchBlocked(ctx context.Context) bool {
+	newlyDisconnected := c.preserveDisconnectedWork()
+	c.mu.Lock()
+	blocked := c.preserveProviderOnStop && !c.terminateRequested
+	if blocked {
+		c.state = ports.ChatControllerStopped
+	}
+	c.mu.Unlock()
+	if newlyDisconnected {
+		c.reportActivity(ctx, domain.ActivityExited, "chat.transport.disconnected", c.now())
+	}
+	return blocked
 }
 
 // closeForBranchHandoff retires and terminates a source controller without
@@ -2669,6 +2723,7 @@ func (c *Controller) project() {
 		}
 	}
 
+	disconnected := c.preserveDisconnectedWork()
 	c.mu.Lock()
 	c.state = ports.ChatControllerStopped
 	suppressStoppedActivity := c.suppressStoppedActivity
@@ -2678,6 +2733,9 @@ func (c *Controller) project() {
 	// Hibernate admitted no running work, but Send can append an optimistic
 	// message during shutdown. Keep that queue for the replacement controller.
 	if preserveProvider || hibernating {
+		if disconnected && !suppressStoppedActivity {
+			c.reportActivity(ctx, domain.ActivityExited, "chat.transport.disconnected", c.now())
+		}
 		return
 	}
 
@@ -3197,6 +3255,13 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 
 	case ports.ChatEventControllerState:
 		if event.ControllerState == ports.ChatControllerStopped {
+			c.preserveDisconnectedWork()
+			c.mu.Lock()
+			preserve := c.preserveProviderOnStop && !c.terminateRequested
+			c.mu.Unlock()
+			if preserve {
+				return nil
+			}
 			return c.cleanupOwnedControllerWork(ctx, now)
 		}
 		return nil

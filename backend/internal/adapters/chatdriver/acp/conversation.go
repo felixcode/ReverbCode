@@ -140,10 +140,13 @@ type conversation struct {
 	compactionSummary string
 	compactedTurn     string
 
-	eventMu      sync.RWMutex
-	events       chan ports.ChatEvent
-	eventsClosed bool
-	closeOnce    sync.Once
+	eventMu              sync.RWMutex
+	events               chan ports.ChatEvent
+	eventsClosed         bool
+	closeOnce            sync.Once
+	terminateOnce        sync.Once
+	terminationErr       error
+	terminationRequested bool
 
 	historyMu     sync.Mutex
 	history       *historyCapture
@@ -342,6 +345,29 @@ func (c *conversation) Events() <-chan ports.ChatEvent {
 // PreservesProviderOnClose reports that Close detaches only when this
 // conversation is backed by the daemon-independent host.
 func (c *conversation) PreservesProviderOnClose() bool { return c.proc.terminate != nil }
+
+// DisconnectedProviderState relies only on authenticated host/OS facts.
+func (c *conversation) DisconnectedProviderState() ports.ChatDisconnectState {
+	select {
+	case <-c.conn.Done():
+	default:
+		return ports.ChatDisconnectNotPersistent
+	}
+	c.mu.Lock()
+	explicit := c.terminationRequested
+	detaching := c.detaching
+	c.mu.Unlock()
+	if explicit {
+		return ports.ChatDisconnectEnded
+	}
+	if detaching || c.proc.terminate == nil {
+		return ports.ChatDisconnectNotPersistent
+	}
+	if c.proc.disconnectState == nil {
+		return ports.ChatDisconnectUnknown
+	}
+	return ports.ChatDisconnectState(c.proc.disconnectState())
+}
 
 // ReconnectedLive distinguishes the same initialized ACP connection from a
 // replacement process recovered with session/load or session/resume.
@@ -1001,8 +1027,26 @@ func (c *conversation) Hibernate() error {
 }
 
 func (c *conversation) closeProvider(terminate, closeSession bool) error {
+	if terminate {
+		c.mu.Lock()
+		c.terminationRequested = true
+		c.mu.Unlock()
+		c.terminateOnce.Do(func() {
+			called := false
+			c.closeOnce.Do(func() { called = true; c.terminationErr = c.closeProviderBody(true, closeSession) })
+			if !called && c.proc.terminate != nil {
+				c.terminationErr = c.proc.terminate()
+			}
+		})
+		return c.terminationErr
+	}
 	var closeErr error
-	c.closeOnce.Do(func() {
+	c.closeOnce.Do(func() { closeErr = c.closeProviderBody(false, closeSession) })
+	return closeErr
+}
+func (c *conversation) closeProviderBody(terminate, closeSession bool) error {
+	var closeErr error
+	func() {
 		c.mu.Lock()
 		c.closed = true
 		persistent := c.proc.terminate != nil
@@ -1029,7 +1073,7 @@ func (c *conversation) closeProvider(terminate, closeSession bool) error {
 		} else {
 			closeErr = c.proc.stop()
 		}
-	})
+	}()
 	return closeErr
 }
 
