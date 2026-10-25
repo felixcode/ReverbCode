@@ -578,12 +578,13 @@ func (s *Store) ListCurrentHeadReviewRunsForSessions(ctx context.Context, ids []
 		return nil, fmt.Errorf("list current-head review runs for sessions: %w", err)
 	}
 	for _, r := range rows {
-		out[r.SessionID] = append(out[r.SessionID], domain.CurrentHeadReviewRun{
-			SessionID: r.SessionID,
-			Harness:   r.Harness,
+		id := domain.SessionID(r.SessionID)
+		out[id] = append(out[id], domain.CurrentHeadReviewRun{
+			SessionID: id,
+			Harness:   domain.ReviewerHarness(r.Harness),
 			PRURL:     r.PRURL,
-			Status:    r.Status,
-			Verdict:   r.Verdict,
+			Status:    domain.ReviewRunStatus(r.Status),
+			Verdict:   domain.ReviewVerdict(r.Verdict),
 			ID:        r.ID,
 			CreatedAt: r.CreatedAt,
 		})
