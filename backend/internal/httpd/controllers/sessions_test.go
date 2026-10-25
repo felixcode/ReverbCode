@@ -4583,7 +4583,9 @@ func TestSessionsSendTypedNotReadyAndAcceptedSemantics(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &sendFailureSessionService{fakeSessionService: newFakeSessionService(), failure: tc.err}
-			srv := newSessionTestServer(t, svc)
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Sessions: svc}, httpd.ControlDeps{}))
+			t.Cleanup(srv.Close)
 			body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/send", `{"message":"queued input"}`)
 			if tc.code != "" {
 				assertErrorCode(t, body, status, tc.status, tc.code)
