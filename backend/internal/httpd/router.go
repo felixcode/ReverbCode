@@ -31,6 +31,7 @@ import (
 type ControlDeps struct {
 	RequestShutdown   func()
 	AgentSwitchPolicy AgentSwitchPolicyControl
+ HistoryRetention func() map[string]any
 	// StartupIdentity is the immutable handshake the server publishes in running.json.
 	StartupIdentity runfile.Info
 }
@@ -79,7 +80,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.NotFound(notFoundJSON)
 	r.MethodNotAllowed(methodNotAllowedJSON)
 
-	mountHealth(r, cfg, control.StartupIdentity)
+	mountHealth(r, cfg, control.StartupIdentity, control.HistoryRetention)
 	mountTerminalMux(r, termMgr, log)
 	mountControl(r, control)
 	mountAgentSwitchPolicyControl(r, control.AgentSwitchPolicy)
@@ -162,9 +163,10 @@ func previewOriginMiddleware(sessions *controllers.SessionsController) func(http
 
 // mountHealth registers the liveness and readiness probes the Electron
 // supervisor polls before letting the renderer connect.
-func mountHealth(r chi.Router, cfg config.Config, startup runfile.Info) {
+func mountHealth(r chi.Router, cfg config.Config, startup runfile.Info, retention func() map[string]any) {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		payload := daemonProbePayload("ok", cfg)
+ if retention != nil {payload["historyRetention"] = retention()}
 		if !startup.StartedAt.IsZero() {
 			payload["startedAt"] = startup.StartedAt
 			payload["appRunId"] = startup.AppRunID

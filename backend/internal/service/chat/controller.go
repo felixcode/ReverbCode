@@ -17,6 +17,8 @@ package chat
 import (
 	"bytes"
 	"context"
+ "crypto/sha256"
+ "encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -429,6 +431,7 @@ func (c *Controller) start() {
 }
 
 type nativeHistoryHighWater struct {
+ semanticSHA string
 	sequence       int64
 	providerTurnID string
 	providerItemID string
@@ -537,7 +540,7 @@ func (p *nativeHistoryCheckpoint) captureAOHighWater(
 		}
 		if !message.Streaming && kind != "" && message.Sequence > turnEvidence[message.TurnID].sequence {
 			turnEvidence[message.TurnID] = nativeHistoryHighWater{
-				sequence: message.Sequence, providerItemID: message.ProviderItemID, kind: kind, text: message.Text,
+				sequence: message.Sequence, providerItemID: message.ProviderItemID, kind: kind, text: message.Text, semanticSHA: message.RetentionSemanticSHA256,
 			}
 		}
 		if message.Role == domain.MessageRoleUser && message.Sequence > 0 &&
@@ -565,7 +568,7 @@ func (p *nativeHistoryCheckpoint) captureAOHighWater(
 		}
 		if activity.Status == domain.ActivityStatusCompleted || activity.Status == domain.ActivityStatusFailed {
 			turnEvidence[activity.TurnID] = nativeHistoryHighWater{
-				sequence: activity.Sequence, providerItemID: activity.ProviderItemID, activityKind: activity.Kind,
+				sequence: activity.Sequence, providerItemID: activity.ProviderItemID, activityKind: activity.Kind, semanticSHA: activity.RetentionSemanticSHA256,
 				activityStatus: activity.Status, summary: activity.Summary, detail: append([]byte(nil), activity.Detail...),
 			}
 		}
@@ -782,13 +785,13 @@ func (p nativeHistoryCheckpoint) mismatches(
 		// provider during load. Exact settled content is the fallback identity
 		// used by reconciliation for that same reason.
 		if boundary.kind != "" && event.Kind == boundary.kind &&
-			nativeHistoryTextMatches(boundary.text, event.Text) {
+			((boundary.semanticSHA == "" && nativeHistoryTextMatches(boundary.text, event.Text)) || (boundary.semanticSHA != "" && func() bool {fp,ok:=nativeHistoryEventMessageFingerprint(event);return ok && retentionDigest(fp)==boundary.semanticSHA}())) {
 			matched = true
 		}
 		if boundary.activityKind != "" &&
 			event.ActivityKind == boundary.activityKind &&
 			event.ActivityStatus == boundary.activityStatus &&
-			event.Summary == boundary.summary && bytes.Equal(event.Detail, boundary.detail) {
+			((boundary.semanticSHA == "" && event.Summary == boundary.summary && bytes.Equal(event.Detail, boundary.detail)) || (boundary.semanticSHA != "" && retentionDigest(nativeHistoryActivityFingerprint(event.ActivityKind,event.ActivityStatus,event.Summary,event.Detail))==boundary.semanticSHA)) {
 			matched = true
 		}
 		if matched {
@@ -974,6 +977,9 @@ type nativeHistoryTurn struct {
 	clientMessage  string
 	providerItem   string
 	text           string
+ promptSHA string
+ expiredMessages map[string]int
+ expiredActivities map[string]int
 	messages       map[string]int
 	activities     map[string]int
 }
@@ -1041,6 +1047,8 @@ func indexNativeHistoryTurns(
 			providerTurnID: turn.ProviderTurnID,
 			state:          turn.State,
 			messages:       make(map[string]int),
+ expiredMessages: make(map[string]int),
+ expiredActivities: make(map[string]int),
 			activities:     make(map[string]int),
 		}
 		byAOTurnID[turn.ID] = candidate
@@ -1071,10 +1079,14 @@ func indexNativeHistoryTurns(
 		if candidate == nil {
 			continue
 		}
-		candidate.messages[nativeHistoryMessageFingerprint(message.Role, message.Text)]++
+		if message.ContentExpired {
+ candidate.expiredMessages[message.RetentionSemanticSHA256]++
+ } else {
+ candidate.messages[nativeHistoryMessageFingerprint(message.Role, message.Text)]++
+ }
 		rememberProviderItem(message.ProviderItemID, candidate)
 		if message.Role == domain.MessageRoleUser && candidate.text == "" {
-			candidate.text = message.Text
+			if message.ContentExpired { candidate.promptSHA = message.RetentionPromptSHA256 } else { candidate.text = message.Text }
 			candidate.clientMessage = message.ClientMessageID
 			candidate.providerItem = message.ProviderItemID
 		}
@@ -1084,9 +1096,11 @@ func indexNativeHistoryTurns(
 		if candidate == nil {
 			continue
 		}
-		candidate.activities[nativeHistoryActivityFingerprint(
-			activity.Kind, activity.Status, activity.Summary, activity.Detail,
-		)]++
+		if activity.ContentExpired { candidate.expiredActivities[activity.RetentionSemanticSHA256]++ } else {
+ candidate.activities[nativeHistoryActivityFingerprint(
+ activity.Kind, activity.Status, activity.Summary, activity.Detail,
+ )]++
+ }
 		rememberProviderItem(activity.ProviderItemID, candidate)
 	}
 	return &nativeHistoryTurnIndex{byProviderTurnID: byProviderTurnID, providerItems: providerItems, ordered: ordered}
@@ -1177,7 +1191,7 @@ func (index *nativeHistoryTurnIndex) mapReplay(events []ports.ChatEvent) (map[st
 		}
 		if match == nil && event.Text != "" {
 			for _, candidate := range ordered {
-				if !used[candidate] && candidate.text == event.Text {
+				if !used[candidate] && ((candidate.promptSHA != "" && candidate.promptSHA == retentionDigest(event.Text)) || (candidate.promptSHA == "" && candidate.text == event.Text)) {
 					match = candidate
 					break
 				}
@@ -1252,18 +1266,18 @@ func reconcileNativeHistory(
 			// new outer id.
 			matched = true
 		}
-		if fingerprint, ok := nativeHistoryEventMessageFingerprint(event); ok && candidate.messages[fingerprint] > 0 {
-			candidate.messages[fingerprint]--
-			matched = true
-		}
+		if fingerprint, ok := nativeHistoryEventMessageFingerprint(event); ok {
+ if candidate.messages[fingerprint] > 0 { candidate.messages[fingerprint]--; matched = true
+ } else if digest := retentionDigest(fingerprint); candidate.expiredMessages[digest] > 0 { candidate.expiredMessages[digest]--; matched = true }
+ }
 		if event.Kind == ports.ChatEventActivityCompleted {
 			fingerprint := nativeHistoryActivityFingerprint(
 				event.ActivityKind, event.ActivityStatus, event.Summary, event.Detail,
 			)
 			if candidate.activities[fingerprint] > 0 {
 				candidate.activities[fingerprint]--
-				matched = true
-			}
+ matched = true
+ } else if digest := retentionDigest(fingerprint); candidate.expiredActivities[digest] > 0 { candidate.expiredActivities[digest]--; matched = true }
 		}
 		if !matched {
 			continue
@@ -3762,3 +3776,6 @@ func (c *Controller) reportActivity(
 			"session", c.sessionID, "event", event, "error", err)
 	}
 }
+
+// Retention digests preserve the original byte-level fingerprint without retaining prose.
+func retentionDigest(value string) string { sum := sha256.Sum256([]byte(value)); return hex.EncodeToString(sum[:]) }

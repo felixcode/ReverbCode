@@ -143,6 +143,8 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 
+ if err := sqlitestore.EnsureHistoryRetentionSchema(writeDB); err != nil { _ = writeDB.Close(); return nil, fmt.Errorf("history retention schema: %w",err) }
+
 	readDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		_ = writeDB.Close()
@@ -277,6 +279,8 @@ func OpenPreMigrated(dataDir string) (*Store, error) {
 			got, want,
 		)
 	}
+
+ if err := sqlitestore.EnsureHistoryRetentionSchema(writeDB); err != nil { _ = writeDB.Close(); return nil, fmt.Errorf("history retention schema: %w",err) }
 
 	readDB, err := sql.Open("sqlite", dsn)
 	if err != nil {

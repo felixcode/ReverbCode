@@ -512,6 +512,9 @@ type ConversationSettings struct {
 // ConversationTurn is one user or automation request plus the agent work it
 // caused.
 type ConversationTurn struct {
+	ContentExpired bool `json:"contentExpired,omitempty"`
+	RetentionSemanticSHA256 string `json:"-"`
+	RetentionPromptSHA256 string `json:"-"`
 	ID             string `json:"id"`
 	ConversationID string `json:"conversationId"`
 	// BranchID is durable provider-lineage metadata used to keep opaque turn ids
@@ -624,6 +627,9 @@ type RetryPrompt struct {
 
 // ConversationMessage is one readable block of text.
 type ConversationMessage struct {
+	ContentExpired bool `json:"contentExpired,omitempty"`
+	RetentionSemanticSHA256 string `json:"-"`
+	RetentionPromptSHA256 string `json:"-"`
 	// InteractionAt is an internal write fact, independent of history CreatedAt.
 	InteractionAt  time.Time `json:"-"`
 	ID             string    `json:"id"`
@@ -661,6 +667,9 @@ type ConversationMessage struct {
 // ConversationActivity is one non-message timeline entry: a command, a diff, a
 // plan, an approval request, a usage report, an error.
 type ConversationActivity struct {
+	ContentExpired bool `json:"contentExpired,omitempty"`
+	RetentionSemanticSHA256 string `json:"-"`
+	RetentionPromptSHA256 string `json:"-"`
 	ID             string         `json:"id"`
 	ConversationID string         `json:"conversationId"`
 	TurnID         string         `json:"turnId,omitempty"`
