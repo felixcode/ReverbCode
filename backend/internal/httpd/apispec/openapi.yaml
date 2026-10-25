@@ -1672,6 +1672,58 @@ paths:
       summary: Run the developer project-registry import through the daemon store
       tags:
       - dev
+  /api/v1/dev/sessions/{sessionId}/preserved-queue/recover:
+    post:
+      operationId: recoverPreservedSessionQueue
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreservedQueueRecoveryRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreservedQueueRecoveryResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Recover exact transport-cleanup queue rows without replaying user input
+        (local listener only)
+      tags:
+      - dev
   /api/v1/endpoints:
     get:
       operationId: getEndpoints
@@ -13407,6 +13459,95 @@ components:
           type: string
       required:
       - ok
+      type: object
+    PreservedQueueInputProof:
+      properties:
+        clientMessageId:
+          type: string
+        clientPayloadHash:
+          type: string
+        deliverySha256:
+          type: string
+        id:
+          type: string
+        textSha256:
+          type: string
+      required:
+      - id
+      - clientMessageId
+      - clientPayloadHash
+      - textSha256
+      - deliverySha256
+      type: object
+    PreservedQueueRecoveryRequest:
+      properties:
+        beforeSnapshotSha256:
+          type: string
+        boundProviderTurnId:
+          type: string
+        boundTurnId:
+          type: string
+        branchId:
+          type: string
+        conversationId:
+          type: string
+        failureAt:
+          type: string
+        nativeId:
+          type: string
+        protocol:
+          type: integer
+        turns:
+          items:
+            $ref: '#/components/schemas/PreservedQueueTurnProof'
+          type: array
+      required:
+      - protocol
+      - conversationId
+      - branchId
+      - nativeId
+      - boundTurnId
+      - boundProviderTurnId
+      - failureAt
+      - beforeSnapshotSha256
+      - turns
+      type: object
+    PreservedQueueRecoveryResponse:
+      properties:
+        dispatch:
+          type: string
+        previouslyRestored:
+          type: integer
+        requestSha256:
+          type: string
+        restored:
+          type: integer
+      required:
+      - restored
+      - previouslyRestored
+      - requestSha256
+      - dispatch
+      type: object
+    PreservedQueueTurnProof:
+      properties:
+        beforeState:
+          type: string
+        id:
+          type: string
+        inputs:
+          items:
+            $ref: '#/components/schemas/PreservedQueueInputProof'
+          type: array
+        previousGeneration:
+          type: string
+        requestedAt:
+          type: string
+      required:
+      - id
+      - previousGeneration
+      - requestedAt
+      - beforeState
+      - inputs
       type: object
     PreviewServerStatusResponse:
       properties:
