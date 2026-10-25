@@ -9,6 +9,10 @@ end, and inconclusive identity. No socket attach, process start, signal, host
 protocol change or command-line inspection is part of this probe. Unsupported or
 unreadable identity is unknown, never proof the provider exited.
 
+The send/dispatch/drain seam also checks disconnect evidence under the existing
+dispatch lock, before changing queued work or preparing a provider turn. Buffered
+completion/compaction cannot release another input after transport loss.
+
 Stopped-event handling and a bare event-stream EOF both preserve bound work and
 queued inputs when the attached persistent provider survives or its state is
 unknown. The controller is still visibly stopped/exited and cannot accept a new
