@@ -229,6 +229,10 @@ func Run() error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = store.Close() }()
+	maintenanceServer := startHistoryMaintenance(log, store)
+	if maintenanceServer != nil {
+		defer maintenanceServer.Close()
+	}
 	if _, err := store.RequeueClaimedReports(context.Background()); err != nil {
 		return fmt.Errorf("recover report delivery claims: %w", err)
 	}

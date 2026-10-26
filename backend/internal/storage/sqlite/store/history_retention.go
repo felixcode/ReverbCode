@@ -32,41 +32,8 @@ func EnsureHistoryRetentionSchema(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(`PRAGMA table_info(ao_history_retention)`)
-	if err != nil {
+	if err = validateHistoryRetentionSchema(context.Background(), tx); err != nil {
 		return err
-	}
-	want := []string{"object_kind", "object_id", "conversation_id", "semantic_sha256", "prompt_sha256", "original_bytes", "original_sha256", "expired_at", "cutoff_at", "fields_json"}
-	i := 0
-	for rows.Next() {
-		var cid, nn, pk int
-		var name, typ string
-		var def any
-		if err = rows.Scan(&cid, &name, &typ, &nn, &def, &pk); err != nil {
-			rows.Close()
-			return err
-		}
-		expectedPK := 0
-		if i < 2 {
-			expectedPK = i + 1
-		}
-		expectedType := "TEXT"
-		if i == 5 {
-			expectedType = "INTEGER"
-		}
-		if i >= len(want) || name != want[i] || typ != expectedType || nn != 1 || pk != expectedPK {
-			rows.Close()
-			return fmt.Errorf("incompatible history retention schema column %d", i)
-		}
-		i++
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	if i != len(want) {
-		return errors.New("incomplete history retention schema")
 	}
 	if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS ao_history_retention_conversation ON ao_history_retention(conversation_id)`); err != nil {
 		return err
@@ -207,10 +174,14 @@ func redactExpiredProviderPayload(ctx context.Context, db gen.DBTX, conversation
 // HistoryRetentionCapability is advertised only by this compatible running
 // binary, after schema initialization. File identity binds the caller's target.
 func (s *Store) HistoryRetentionCapability() map[string]any {
+	return s.historyRetentionCapability(context.Background())
+}
+
+func (s *Store) historyRetentionCapability(ctx context.Context) map[string]any {
 	result := map[string]any{"protocol": 1, "schemaReady": false}
 	var seq int
 	var name, path string
-	if err := s.readDB.QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, `PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
 		return result
 	}
 	info, err := os.Stat(path)
@@ -228,8 +199,7 @@ func (s *Store) HistoryRetentionCapability() map[string]any {
 	if !dev.IsValid() || !ino.IsValid() || !dev.CanUint() || !ino.CanUint() {
 		return result
 	}
-	var columns int
-	if err = s.readDB.QueryRow(`SELECT count(*) FROM pragma_table_info('ao_history_retention')`).Scan(&columns); err != nil || columns != 10 {
+	if err = validateHistoryRetentionSchema(ctx, s.readDB); err != nil {
 		return result
 	}
 	statData, err := os.ReadFile("/proc/self/stat")
@@ -327,4 +297,45 @@ func (s *Store) historyTurnExpired(ctx context.Context, db gen.DBTX, conversatio
 	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ao_history_retention r WHERE r.object_kind='turn' AND r.object_id=? AND r.conversation_id=?
  UNION ALL SELECT 1 FROM conversation_messages m JOIN ao_history_retention r ON r.object_kind='message' AND r.object_id=m.id WHERE m.conversation_id=? AND m.turn_id=? AND m.role='user')`, turnID, conversationID, conversationID, turnID).Scan(&expired)
 	return expired, err
+}
+
+func validateHistoryRetentionSchema(ctx context.Context, db gen.DBTX) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(ao_history_retention)`)
+	if err != nil {
+		return err
+	}
+	want := []string{"object_kind", "object_id", "conversation_id", "semantic_sha256", "prompt_sha256", "original_bytes", "original_sha256", "expired_at", "cutoff_at", "fields_json"}
+	i := 0
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var def any
+		if err = rows.Scan(&cid, &name, &typ, &nn, &def, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		expectedPK := 0
+		if i < 2 {
+			expectedPK = i + 1
+		}
+		expectedType := "TEXT"
+		if i == 5 {
+			expectedType = "INTEGER"
+		}
+		if i >= len(want) || name != want[i] || typ != expectedType || nn != 1 || pk != expectedPK {
+			rows.Close()
+			return fmt.Errorf("incompatible history retention schema column %d", i)
+		}
+		i++
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if i != len(want) {
+		return errors.New("incomplete history retention schema")
+	}
+
+	return nil
 }
