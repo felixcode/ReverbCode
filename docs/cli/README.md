@@ -341,3 +341,7 @@ versions do not support canonical claims and may drop this field when saving
 project settings.
 
 `ao session recover-preserved-queue <session-id> --request /private/request.json` posts metadata to the local-only maintenance endpoint; see [the recovery contract](../operations/preserved-queue-recovery.md). Original turns and inputs are retained.
+
+## Private history maintenance
+
+`ao history-maintenance` sends one typed request over the operator-configured, same-UID Unix socket. It never opens SQLite or uses a network-facing maintenance route. Output contains counts/status/timings and a cursor digest only. See [coordination and deployment contract](../history-maintenance.md).

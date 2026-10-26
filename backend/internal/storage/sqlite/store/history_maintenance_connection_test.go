@@ -40,10 +40,13 @@ func (c *maintenanceFaultConn) Close() error                        { c.closed =
 func (c *maintenanceFaultConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
 	return &maintenanceFaultRows{value: int64(c.busy)}, nil
 }
-func (c *maintenanceFaultConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+func (c *maintenanceFaultConn) ExecContext(ctx context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	value, err := strconv.Atoi(strings.TrimPrefix(query, "PRAGMA busy_timeout="))
 	if err != nil {
 		return nil, err
+	}
+	if value != 0 && ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	c.busy = value
 	if value == 0 {

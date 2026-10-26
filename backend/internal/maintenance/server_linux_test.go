@@ -83,3 +83,19 @@ func TestUnixPrivateMaintenance(t *testing.T) {
 		t.Fatal("public parent accepted")
 	}
 }
+
+func TestMaintenanceInvalidSettingsDoNotStartListener(t *testing.T) {
+	for _, value := range []string{"NaN", "+Inf", "0", "-1", "1e100", "0.0000000000000000000001"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("ALBANIA_AO_HISTORY_MAINTENANCE_SOCKET", filepath.Join(t.TempDir(), "api.sock"))
+			t.Setenv("ALBANIA_AO_HISTORY_TRANSACTION_SECONDS", value)
+			server, err := StartConfigured(nil)
+			if err == nil || server != nil {
+				if server != nil {
+					server.Close()
+				}
+				t.Fatal("invalid settings accepted")
+			}
+		})
+	}
+}
