@@ -267,7 +267,7 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 				sizeExpr = append(sizeExpr, `COALESCE(length(CAST("`+f+`" AS BLOB)),0)`)
 			}
 			var size int64
-			e := tx.QueryRowContext(writeCtx, `SELECT `+strings.Join(sizeExpr, "+")+` FROM "`+stage.table+`" WHERE id=?`, id).Scan(&size)
+			e = tx.QueryRowContext(writeCtx, `SELECT `+strings.Join(sizeExpr, "+")+` FROM "`+stage.table+`" WHERE id=?`, id).Scan(&size)
 			if errors.Is(e, sql.ErrNoRows) {
 				result.Scanned++
 				result.NextCursor = maintenanceID(id)
