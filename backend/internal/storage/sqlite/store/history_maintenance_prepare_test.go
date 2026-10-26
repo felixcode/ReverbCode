@@ -199,3 +199,39 @@ func TestMaintenanceSinglePrepareDoesNotReserveBusinessWriter(t *testing.T) {
 		t.Fatal("maintenance admission leaked")
 	}
 }
+
+func TestMaintenanceBuiltinCASDistinguishesEmptyNullAndBinary(t *testing.T) {
+	w, r := maintenancePrepareFixture(t)
+	ctx := context.Background()
+	if _, err := w.Exec(`ALTER TABLE telemetry_event ADD COLUMN empty_value TEXT NOT NULL DEFAULT '';ALTER TABLE telemetry_event ADD COLUMN null_value TEXT;ALTER TABLE telemetry_event ADD COLUMN binary_value BLOB;UPDATE telemetry_event SET binary_value=x'80ff' WHERE id='event'`); err != nil {
+		t.Fatal(err)
+	}
+	o := DefaultHistoryMaintenanceOptions()
+	now := time.Now().UTC()
+	cutoff := now.Add(-48 * time.Hour)
+	plans, err := prepareMaintenanceRows(ctx, r, maintenanceStages["builtin:telemetry_event"], "builtin:telemetry_event", "id", []any{"event"}, o, now, cutoff)
+	if err != nil || len(plans) != 1 {
+		t.Fatal(err)
+	}
+	tx, err := w.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := maintenanceCAS(ctx, tx, maintenanceStages["builtin:telemetry_event"], "id", plans[0])
+	tx.Rollback()
+	if err != nil || !same {
+		t.Fatal("unchanged binary/empty/null rejected", err)
+	}
+	if _, err = w.Exec(`UPDATE telemetry_event SET null_value='' WHERE id='event'`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = w.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err = maintenanceCAS(ctx, tx, maintenanceStages["builtin:telemetry_event"], "id", plans[0])
+	tx.Rollback()
+	if err != nil || same {
+		t.Fatal("NULL and empty merged", err)
+	}
+}

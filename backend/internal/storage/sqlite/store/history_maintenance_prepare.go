@@ -227,6 +227,20 @@ func maintenanceCAS(ctx context.Context, tx *sql.Tx, stage maintenanceStage, key
 		expr := maintenanceQuoted(name)
 		if p.builtin {
 			expr = "CAST(" + expr + " AS BLOB)"
+			// Some drivers represent x'' as a typed nil []byte. Binding it as
+			// a parameter would become NULL and falsely reject an unchanged
+			// empty field. SQL's literal empty BLOB preserves the distinction.
+			empty := false
+			switch value := p.cas[name].(type) {
+			case []byte:
+				empty = len(value) == 0
+			case string:
+				empty = value == ""
+			}
+			if empty {
+				where = append(where, expr+" IS x''")
+				continue
+			}
 		}
 		where = append(where, expr+" IS ?")
 		args = append(args, p.cas[name])

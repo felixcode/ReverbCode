@@ -58,7 +58,8 @@ func TestOwnedMaintenanceTerminalAndBusyProtection(t *testing.T) {
 		}
 	}
 	var priorRevision, priorSequence, beforeCDC int64
-	var priorClient, priorPayload, priorBranch string
+	var priorClient, priorBranch string
+	var priorPayload sql.NullString
 	if err = db.QueryRow(`SELECT revision,sequence,client_message_id,client_payload_hash,branch_id FROM conversation_messages WHERE id='old'`).Scan(&priorRevision, &priorSequence, &priorClient, &priorPayload, &priorBranch); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,8 @@ func TestOwnedMaintenanceTerminalAndBusyProtection(t *testing.T) {
 		t.Fatal("active content changed")
 	}
 	var afterRevision, afterSequence int64
-	var afterClient, afterPayload, afterBranch string
+	var afterClient, afterBranch string
+	var afterPayload sql.NullString
 	if err = db.QueryRow(`SELECT revision,sequence,client_message_id,client_payload_hash,branch_id FROM conversation_messages WHERE id='old'`).Scan(&afterRevision, &afterSequence, &afterClient, &afterPayload, &afterBranch); err != nil {
 		t.Fatal(err)
 	}
