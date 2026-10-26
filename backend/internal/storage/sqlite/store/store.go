@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -34,7 +35,8 @@ type Store struct {
 }
 
 type contextMutex struct {
-	token chan struct{}
+	token           chan struct{}
+	businessWaiting atomic.Int64
 }
 
 func newContextMutex() *contextMutex {
@@ -44,10 +46,14 @@ func newContextMutex() *contextMutex {
 }
 
 func (m *contextMutex) Lock() {
+	m.businessWaiting.Add(1)
 	<-m.token
+	m.businessWaiting.Add(-1)
 }
 
 func (m *contextMutex) LockContext(ctx context.Context) error {
+	m.businessWaiting.Add(1)
+	defer m.businessWaiting.Add(-1)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -135,3 +141,23 @@ func (s *Store) inTxDB(ctx context.Context, what string, fn func(*gen.Queries, g
 	}
 	return tx.Commit()
 }
+
+// Maintenance never queues for the business writer token. A newly waiting
+// business writer also causes an admitted maintenance batch to stop at its next
+// object boundary. Cancellation rolls back any uncommitted partial work.
+func (m *contextMutex) TryMaintenance() bool {
+	if m.businessWaiting.Load() != 0 {
+		return false
+	}
+	select {
+	case <-m.token:
+		if m.businessWaiting.Load() != 0 {
+			m.token <- struct{}{}
+			return false
+		}
+		return true
+	default:
+		return false
+	}
+}
+func (m *contextMutex) BusinessWaiting() bool { return m.businessWaiting.Load() != 0 }

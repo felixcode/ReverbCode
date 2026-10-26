@@ -203,6 +203,7 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	root.AddCommand(newStatusCommand(ctx))
 	root.AddCommand(newRemoteHostCommand(ctx))
 	root.AddCommand(newDoctorCommand(ctx))
+	root.AddCommand(newHistoryMaintenanceCommand())
 	root.AddCommand(newAgentCommand(ctx))
 	root.AddCommand(newSpawnCommand(ctx))
 	root.AddCommand(newSendCommand(ctx))

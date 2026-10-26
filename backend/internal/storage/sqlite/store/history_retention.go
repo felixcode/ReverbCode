@@ -207,10 +207,14 @@ func redactExpiredProviderPayload(ctx context.Context, db gen.DBTX, conversation
 // HistoryRetentionCapability is advertised only by this compatible running
 // binary, after schema initialization. File identity binds the caller's target.
 func (s *Store) HistoryRetentionCapability() map[string]any {
+	return s.historyRetentionCapability(context.Background())
+}
+
+func (s *Store) historyRetentionCapability(ctx context.Context) map[string]any {
 	result := map[string]any{"protocol": 1, "schemaReady": false}
 	var seq int
 	var name, path string
-	if err := s.readDB.QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, `PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
 		return result
 	}
 	info, err := os.Stat(path)
@@ -229,7 +233,7 @@ func (s *Store) HistoryRetentionCapability() map[string]any {
 		return result
 	}
 	var columns int
-	if err = s.readDB.QueryRow(`SELECT count(*) FROM pragma_table_info('ao_history_retention')`).Scan(&columns); err != nil || columns != 10 {
+	if err = s.readDB.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('ao_history_retention')`).Scan(&columns); err != nil || columns != 10 {
 		return result
 	}
 	statData, err := os.ReadFile("/proc/self/stat")
