@@ -103,7 +103,7 @@ func TestMaintenancePreparationCASRejectsBodyOwnerRevisionAndBranchChanges(t *te
 }
 
 type maintenanceObservedDB struct {
-	db      *sql.DB
+	db      maintenanceDB
 	queries *[]string
 }
 
@@ -233,5 +233,75 @@ func TestMaintenanceBuiltinCASDistinguishesEmptyNullAndBinary(t *testing.T) {
 	tx.Rollback()
 	if err != nil || same {
 		t.Fatal("NULL and empty merged", err)
+	}
+}
+
+type maintenanceGrowingSnapshot struct {
+	db   maintenanceDB
+	grow func() error
+	grew bool
+}
+
+func (o *maintenanceGrowingSnapshot) QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error) {
+	if !o.grew && strings.Contains(q, "payload_json") && !strings.Contains(q, "octet_length") {
+		o.grew = true
+		if err := o.grow(); err != nil {
+			return nil, err
+		}
+	}
+	return o.db.QueryContext(ctx, q, args...)
+}
+func (o *maintenanceGrowingSnapshot) QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row {
+	return o.db.QueryRowContext(ctx, q, args...)
+}
+func TestMaintenanceReadSnapshotBoundsGrowthBetweenSizeAndBody(t *testing.T) {
+	for _, stageName := range []string{"raw", "builtin:telemetry_event"} {
+		t.Run(stageName, func(t *testing.T) {
+			w, r := maintenancePrepareFixture(t)
+			ctx := context.Background()
+			stage := maintenanceStages[stageName]
+			var id any = int64(1)
+			if stage.builtin {
+				id = "event"
+			}
+			reader, err := r.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Rollback()
+			large := `{"providerTurnId":"native-new","text":"` + strings.Repeat("x", 2<<20) + `"}`
+			observed := &maintenanceGrowingSnapshot{db: reader, grow: func() error {
+				_, e := w.Exec(`UPDATE `+maintenanceQuoted(stage.table)+` SET payload_json=? WHERE id=?`, large, id)
+				return e
+			}}
+			o := DefaultHistoryMaintenanceOptions()
+			o.MaxRowBytes = 128
+			o.BatchBytes = 256
+			now := time.Now().UTC()
+			cutoff := now.Add(-48 * time.Hour)
+			plans, err := prepareMaintenanceRows(ctx, observed, stage, stageName, "id", []any{id}, o, now, cutoff)
+			if err != nil || len(plans) != 1 || !observed.grew || plans[0].skip != "" || plans[0].size > 128 {
+				t.Fatal("bounded snapshot preparation", err)
+			}
+			if !stage.builtin && len(plans[0].row.text("payload_json")) > 128 {
+				t.Fatal("concurrent large body bypassed budget")
+			}
+			if err = reader.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			writer, err := w.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := HistoryMaintenanceResult{Retained: map[string]int{}}
+			advanced, err := applyMaintenancePrepared(ctx, writer, stage, stageName, "id", plans[0], cutoff, now, &result)
+			if err != nil || advanced || result.Compacted != 0 || result.Deleted != 0 || result.Retained["concurrent_body_or_owner_change"] != 1 {
+				writer.Rollback()
+				t.Fatal("grown body was applied", result, err)
+			}
+			if err = writer.Commit(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

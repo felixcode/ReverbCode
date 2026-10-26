@@ -289,6 +289,16 @@ func applyMaintenancePrepared(ctx context.Context, tx *sql.Tx, stage maintenance
 		}
 		return true, nil
 	}
+	// A body may have grown after reader preparation. Reject by optimized
+	// record-length metadata before evaluating any large original-value CAS.
+	currentSize, sizeErr := maintenanceSize(ctx, tx, stage, key, p.id, p.bodyColumns)
+	if errors.Is(sizeErr, sql.ErrNoRows) || sizeErr == nil && currentSize != p.size {
+		result.Retained["concurrent_body_or_owner_change"]++
+		return false, nil
+	}
+	if sizeErr != nil {
+		return false, sizeErr
+	}
 	if !stage.builtin {
 		marked, e := maintenanceExists(ctx, tx, `SELECT 1 FROM ao_history_retention WHERE object_kind=? AND object_id=?`, stage.kind, maintenanceID(p.id))
 		if e != nil {

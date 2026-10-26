@@ -51,7 +51,7 @@ be read/previewed without modification by the separate scheduler component.
 
 ## Coordination and proof
 
-A separate non-queued single-maintenance admission bounds preparation memory before any DB query. Candidate PK/body reads, strict parsing, transformation, and full marker/fingerprint hashing finish before writer admission. Autocommit reader queries are closed before writeMu is requested; no read snapshot is held while waiting. Maintenance never queues on
+A separate non-queued single-maintenance admission bounds preparation memory before any DB query. Candidate PK/body reads, strict parsing, transformation, and full marker/fingerprint hashing finish before writer admission. A bounded read-only transaction ties size and body to one snapshot and is closed before writeMu is requested; no read snapshot is held while waiting. Maintenance never queues on
 `writeMu`: an active or already waiting business writer yields a deferred result.
 After admission, pending business writers stop the batch at its next object
 boundary. Each batch releases its single writer connection and token; the
@@ -110,3 +110,5 @@ separately controlled physical compaction.
 Byte admission uses [SQLite octet_length(column)](https://www.sqlite.org/lang_corefunc.html#octet_length), which obtains TEXT/BLOB byte lengths from record metadata without reading the content. Maintenance requires UTF-8 so the budget and semantic UTF-8 hash units agree. Only fixed necessary stage/lifecycle columns are loaded; another object's unrelated large prompt/diff is not selected for qualification.
 
 The effective maximum row bytes is clamped to the batch byte budget. An oversized first record is retained and reported rather than causing a permanent zero-progress prefix. Outputs use their own projection: unrelated activity summary/detail bodies are not selected or charged as output data. Builtin deletion preparation retains exact bounded original column bytes for CAS; fresh installed janitor predicates remain authoritative in the write transaction.
+
+The writer checks optimized current byte-length metadata before evaluating body CAS. A record that grew between preparation and application is retained without loading the new oversized body for comparison.

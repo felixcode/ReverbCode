@@ -232,8 +232,16 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 			err = errors.New("maintenance database identity changed")
 			return
 		}
+		// Metadata size and body materialization share one bounded read-only
+		// snapshot, so a concurrent growing record cannot bypass byte limits.
+		readTx, e := s.readDB.BeginTx(readCtx, &sql.TxOptions{ReadOnly: true})
+		if e != nil {
+			err = e
+			return
+		}
+		defer readTx.Rollback()
 		var numeric bool
-		key, numeric, err = maintenanceKey(readCtx, s.readDB, stage)
+		key, numeric, err = maintenanceKey(readCtx, readTx, stage)
 		if err != nil {
 			return
 		}
@@ -250,7 +258,7 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 				cursor = v
 			}
 		}
-		rows, e := s.readDB.QueryContext(readCtx, `SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>? ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`, cursor, o.BatchRows)
+		rows, e := readTx.QueryContext(readCtx, `SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>? ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`, cursor, o.BatchRows)
 		if e != nil {
 			err = e
 			return
@@ -276,7 +284,10 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 			result.Status = "ok"
 			return
 		}
-		plans, err = prepareMaintenanceRows(readCtx, s.readDB, stage, req.Stage, key, ids, o, now, cutoff)
+		plans, err = prepareMaintenanceRows(readCtx, readTx, stage, req.Stage, key, ids, o, now, cutoff)
+		if err == nil {
+			err = readTx.Commit()
+		}
 	}()
 	if err != nil || result.Complete {
 		return result, err
