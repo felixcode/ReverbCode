@@ -102,3 +102,125 @@ func TestOwnedMaintenanceTerminalAndBusyProtection(t *testing.T) {
 		t.Fatal("changed DB identity accepted")
 	}
 }
+
+func TestOwnedMaintenanceYieldsToProjectionAndRollsBackOnTimeout(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := sqlite.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	seedProject(t, s, "contention")
+	rec := sampleRecord("contention")
+	rec.Mode = domain.SessionModeChat
+	session, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := s.CreateConversation(ctx, "contention-conv", domain.ConversationScopeSession, "contention", session.ID, histClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ClaimChatControllerGeneration(ctx, session.ID, "gen"); err != nil {
+		t.Fatal(err)
+	}
+	cap := s.HistoryRetentionCapability()
+	req := adapter.HistoryMaintenanceRequest{Stage: "message", Cutoff: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano), DatabaseDevice: cap["dbDevice"].(uint64), DatabaseInode: cap["dbInode"].(uint64)}
+	// Ensure a PK candidate exists, so maintenance reaches writer admission.
+	if _, err = s.AppendUserMessage(ctx, conv.ID, session.ID, "gen", domain.ConversationMessage{ID: "input", Text: "LIVE", Origin: domain.MessageOriginHuman}, "running", histClock); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, e := s.ProjectProviderEvent(ctx, conv.ID, session.ID, "gen", "new-live-event", "message.delta", `{"text":"LIVE"}`, time.Now(), func(context.Context) error { close(entered); <-release; return nil })
+		done <- e
+	}()
+	<-entered
+	options := adapter.DefaultHistoryMaintenanceOptions()
+	began := time.Now()
+	result, err := s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Status != "deferred" || result.Committed || result.NextCursor != "" || time.Since(began) > time.Second {
+		t.Fatalf("business admission: %+v %v", result, err)
+	}
+	close(release)
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	// An independent writer is not part of writeMu. A bounded context must still
+	// roll back, preserve body/marker/cursor, and release the single AO writer.
+	db, err := sql.Open("sqlite", filepath.Join(dir, "ao.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	external, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer external.Close()
+	if _, err = external.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	options.WriteBudget = 50 * time.Millisecond
+	released := make(chan struct{})
+	go func() { time.Sleep(500 * time.Millisecond); external.ExecContext(ctx, `ROLLBACK`); close(released) }()
+	began = time.Now()
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	<-released
+	if err == nil || result.Committed || result.Compacted != 0 || result.NextCursor != "" {
+		t.Fatal("failed writer advanced receipt", result, err)
+	}
+	if result.WaitMS > 200 {
+		t.Fatal("maintenance queued behind external writer")
+	}
+	options.WriteBudget = time.Second
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || !result.Committed || result.Compacted != 0 {
+		t.Fatal("writer reservation leaked", result, err)
+	}
+	applied, err := s.ProjectProviderEvent(ctx, conv.ID, session.ID, "gen", "new-live-event", "message.delta", `{}`, time.Now(), func(context.Context) error { t.Fatal("duplicate projection applied"); return nil })
+	if err != nil || applied {
+		t.Fatal("archive idempotence changed", err)
+	}
+}
+
+func TestOwnedMaintenanceBuiltinBoundedDeletes(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := sqlite.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "ao.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, v := range []struct{ id, stamp string }{{"old", "2020-01-01T00:00:00Z"}, {"fresh", time.Now().UTC().Format(time.RFC3339Nano)}, {"unknown", "2026-01-01T00:00:00"}} {
+		if _, err = db.Exec(`INSERT INTO telemetry_event(id,occurred_at,name,source,level,payload_json)VALUES(?,?,'synthetic','synthetic','info','{}')`, v.id, v.stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cap := s.HistoryRetentionCapability()
+	o := adapter.DefaultHistoryMaintenanceOptions()
+	o.BatchRows = 2
+	o.WriteBudget = time.Second
+	req := adapter.HistoryMaintenanceRequest{Stage: "builtin:telemetry_event", Cutoff: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano), DatabaseDevice: cap["dbDevice"].(uint64), DatabaseInode: cap["dbInode"].(uint64)}
+	r, err := s.MaintainHistoryBatch(ctx, req, o)
+	if err != nil || r.Scanned != 2 || r.Deleted != 1 || r.Complete {
+		t.Fatal("bounded builtin", r, err)
+	}
+	req.Cursor = r.NextCursor
+	r, err = s.MaintainHistoryBatch(ctx, req, o)
+	if err != nil || r.Retained["invalid_timestamp"] != 1 || r.Deleted != 0 {
+		t.Fatal("unproven builtin age", r, err)
+	}
+	var n int
+	if err = db.QueryRow(`SELECT count(*) FROM telemetry_event`).Scan(&n); err != nil || n != 2 {
+		t.Fatal(n, err)
+	}
+}

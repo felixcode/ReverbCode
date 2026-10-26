@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -234,14 +235,33 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 	defer s.writeMu.Unlock()
 	writeCtx, cancel := context.WithTimeout(ctx, o.WriteBudget)
 	defer cancel()
-	tx, err := s.writeDB.BeginTx(writeCtx, nil)
+	connection, err := s.writeDB.Conn(writeCtx)
+	if err != nil {
+		return result, err
+	}
+	defer connection.Close()
+	var priorBusy int
+	if err = connection.QueryRowContext(writeCtx, "PRAGMA busy_timeout").Scan(&priorBusy); err != nil {
+		return result, err
+	}
+	if _, err = connection.ExecContext(writeCtx, "PRAGMA busy_timeout=0"); err != nil {
+		return result, err
+	}
+	defer func() {
+		restoreCtx, stop := context.WithTimeout(context.Background(), o.ReadBudget)
+		defer stop()
+		if _, restoreErr := connection.ExecContext(restoreCtx, fmt.Sprintf("PRAGMA busy_timeout=%d", priorBusy)); restoreErr != nil {
+			_ = connection.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+	tx, err := connection.BeginTx(writeCtx, nil)
 	result.WaitMS = maintenanceMillis(waitStarted)
 	if err != nil {
 		return result, err
 	}
-	defer tx.Rollback()
 	heldStarted := time.Now()
 	defer func() { result.HeldMS = maintenanceMillis(heldStarted) }()
+	defer tx.Rollback()
 	used := int64(0)
 	for _, id := range ids {
 		if writeCtx.Err() != nil {

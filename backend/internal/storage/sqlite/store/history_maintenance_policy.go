@@ -105,6 +105,12 @@ func maintenanceTime(value string) (time.Time, error) {
 	if len(parts) > 1 && (parts[1] == "UTC" || parts[1] == "GMT") && zone != "+00:00" && zone != "-00:00" && zone != "+0000" && zone != "-0000" {
 		return time.Time{}, maintenanceRetained("invalid_timestamp")
 	}
+	if len(zone) > 1 {
+		h, e := strconv.Atoi(zone[1:3])
+		if e != nil || h > 23 {
+			return time.Time{}, maintenanceRetained("invalid_timestamp")
+		}
+	}
 	if len(zone) == 5 && zone != "Z" {
 		zone = zone[:3] + ":" + zone[3:]
 	}
@@ -364,7 +370,8 @@ func maintenanceTruthy(v any) bool {
 	case string:
 		return x != ""
 	case json.Number:
-		return x != "0"
+		n, _ := strconv.ParseFloat(string(x), 64)
+		return n != 0
 	case []any:
 		return len(x) > 0
 	case map[string]any:
@@ -443,7 +450,7 @@ func maintenanceCanonical(v any) (string, error) {
 	if err := e.Encode(v); err != nil {
 		return "", err
 	}
-	return strings.TrimSuffix(b.String(), "\n"), nil
+	return maintenanceUnicodeJSON(strings.TrimSuffix(b.String(), "\n")), nil
 }
 func maintenanceID(v any) string {
 	switch x := v.(type) {
@@ -490,4 +497,36 @@ func maintenanceValidEscapes(text string) bool {
 		}
 	}
 	return true
+}
+
+// encoding/json always escapes U+2028/2029; the existing Python audit contract
+// uses ensure_ascii=False. Unescape only actual encoder escapes, never a
+// user-authored literal backslash sequence.
+func maintenanceUnicodeJSON(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		if text[i] != '\\' {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(text) && text[j] == '\\' {
+			j++
+		}
+		n := j - i
+		if n%2 == 1 && j+5 <= len(text) && (text[j:j+5] == "u2028" || text[j:j+5] == "u2029") {
+			out.WriteString(text[i : j-1])
+			if text[j+4] == '8' {
+				out.WriteRune('\u2028')
+			} else {
+				out.WriteRune('\u2029')
+			}
+			i = j + 5
+		} else {
+			out.WriteString(text[i:j])
+			i = j
+		}
+	}
+	return out.String()
 }
