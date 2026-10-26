@@ -2811,7 +2811,7 @@ func (s *Store) projectProviderEvent(
 
 	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("begin provider event projection: %w", err)
+		return false, projectionFailure("begin", fmt.Errorf("begin provider event projection: %w", err))
 	}
 	defer func() { _ = tx.Rollback() }()
 	q := s.qw.WithTx(tx)
@@ -2823,7 +2823,7 @@ func (s *Store) projectProviderEvent(
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("commit provider event %s: %w", method, err)
+		return false, projectionFailure("commit", fmt.Errorf("commit provider event %s: %w", method, err))
 	}
 	return projected, nil
 }
@@ -2841,7 +2841,7 @@ func projectProviderEventTx(
 	if reviewID != "" {
 		owner, err := q.GetReviewByID(ctx, reviewID)
 		if err != nil {
-			return false, fmt.Errorf("read reviewer controller generation for %s: %w", reviewID, err)
+			return false, projectionFailure("owner", fmt.Errorf("read reviewer controller generation for %s: %w", reviewID, err))
 		}
 		if owner.ControllerGeneration != generation || owner.InterfaceMode != "chat" || owner.SessionID != session {
 			return false, nil
@@ -2849,7 +2849,7 @@ func projectProviderEventTx(
 	} else {
 		owner, err := q.GetSession(ctx, session)
 		if err != nil {
-			return false, fmt.Errorf("read controller generation for %s: %w", session, err)
+			return false, projectionFailure("owner", fmt.Errorf("read controller generation for %s: %w", session, err))
 		}
 		if owner.ControllerGeneration != generation {
 			return false, nil
@@ -2859,7 +2859,7 @@ func projectProviderEventTx(
 	var expiredPayload bool
 	payloadJSON, expiredPayload, redactErr = redactExpiredProviderPayload(ctx, db, conversationID, payloadJSON)
 	if redactErr != nil {
-		return false, redactErr
+		return false, projectionFailure("retention", redactErr)
 	}
 	inserted, err := q.InsertConversationProviderEvent(ctx, gen.InsertConversationProviderEventParams{
 		ConversationID:  conversationID,
@@ -2870,7 +2870,7 @@ func projectProviderEventTx(
 		ReceivedAt:      now,
 	})
 	if err != nil {
-		return false, fmt.Errorf("archive provider event %s: %w", method, err)
+		return false, projectionFailure("archive", fmt.Errorf("archive provider event %s: %w", method, err))
 	}
 	if inserted == 0 {
 		return false, nil
@@ -2881,7 +2881,7 @@ func projectProviderEventTx(
 	txCtx := context.WithValue(ctx, conversationProjectionTxKey{}, q)
 	txCtx = context.WithValue(txCtx, projectionDBKey{}, db)
 	if err := project(txCtx); err != nil {
-		return false, fmt.Errorf("project provider event %s: %w", method, err)
+		return false, projectionFailure("apply", fmt.Errorf("project provider event %s: %w", method, err))
 	}
 	return true, nil
 }
