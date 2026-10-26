@@ -60,12 +60,12 @@ func TestMaintenanceStrictPolicies(t *testing.T) {
 		}
 	}
 	original := maintenanceRow{"role": "user", "text": "unique-expired-sentinel", "delivery_content_json": "body"}
-	update, fields, err := maintenanceTransform(original, "message", "now", "cutoff")
+	update, fields, err := maintenanceTransform(context.Background(), original, "message", "now", "cutoff")
 	if err != nil || update["text"] != maintenanceExpired || len(fields) != 2 {
 		t.Fatal(update, fields, err)
 	}
 	raw := maintenanceRow{"payload_json": `{"method":"turn.completed","providerTurnId":"native","error":null,"text":"secret","usage":{"input":4}}`}
-	update, fields, err = maintenanceTransform(raw, "raw", "now", "cutoff")
+	update, fields, err = maintenanceTransform(context.Background(), raw, "raw", "now", "cutoff")
 	if err != nil || len(fields) != 1 {
 		t.Fatal(err)
 	}

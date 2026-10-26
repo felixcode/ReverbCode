@@ -97,6 +97,67 @@ func TestOwnedMaintenanceTerminalAndBusyProtection(t *testing.T) {
 	if err == nil || result.Committed {
 		t.Fatal("canceled request committed")
 	}
+
+	// All other payload stages use the same owned transaction and retain a
+	// pending authorization, even when its associated turn is old and terminal.
+	activity := domain.ConversationActivity{ID: "command", ProviderItemID: "command-native", Kind: domain.ActivityKindCommand, Status: domain.ActivityStatusCompleted, Summary: "UNIQUE-EXPIRED-SENTINEL", Detail: []byte(`{"detail":"UNIQUE-EXPIRED-SENTINEL"}`)}
+	if err = s.UpsertActivity(ctx, conv.ID, "old-native", activity, histClock); err != nil {
+		t.Fatal(err)
+	}
+	pending := domain.ConversationActivity{ID: "pending", ProviderItemID: "pending-native", Kind: domain.ActivityKindApproval, Status: domain.ActivityStatusPending, Summary: "pending", Detail: []byte(`{}`), RequestID: "request"}
+	if err = s.UpsertActivity(ctx, conv.ID, "old-native", pending, histClock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE conversation_activities SET command_output='UNIQUE-EXPIRED-SENTINEL',streamed_text='UNIQUE-EXPIRED-SENTINEL' WHERE id='command'`); err != nil {
+		t.Fatal(err)
+	}
+	req.Stage = "outputs"
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Compacted != 0 {
+		t.Fatal("pending authorization unprotected", result, err)
+	}
+	if _, err = db.Exec(`UPDATE conversation_activities SET status='resolved' WHERE id='pending'`); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Compacted != 1 {
+		t.Fatal("outputs", result, err)
+	}
+	req.Stage = "activity"
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Compacted != 2 {
+		t.Fatal("activity", result, err)
+	}
+	if _, err = db.Exec(`UPDATE conversation_turns SET diff_json='UNIQUE-EXPIRED-SENTINEL',plan_json='UNIQUE-EXPIRED-SENTINEL' WHERE id='old-turn'`); err != nil {
+		t.Fatal(err)
+	}
+	req.Stage = "turn"
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Compacted != 1 {
+		t.Fatal("turn details", result, err)
+	}
+	if _, err = db.Exec(`UPDATE sessions SET prompt='UNIQUE-EXPIRED-SENTINEL',updated_at='2020-01-01T00:00:00Z' WHERE id=?`, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	req.Stage = "session"
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Compacted != 0 {
+		t.Fatal("active owner prompt", result, err)
+	}
+	if _, err = db.Exec(`UPDATE sessions SET is_terminated=1 WHERE id=?`, session.ID); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Compacted != 0 {
+		t.Fatal("queued owner prompt", result, err)
+	}
+	if _, err = db.Exec(`UPDATE conversation_turns SET state='completed',completed_at='2020-01-01T00:00:00Z' WHERE id='busy-turn'`); err != nil {
+		t.Fatal(err)
+	}
+	result, err = s.MaintainHistoryBatch(ctx, req, options)
+	if err != nil || result.Compacted != 1 {
+		t.Fatal("closed owner prompt", result, err)
+	}
 	req.DatabaseInode++
 	if _, err = s.MaintainHistoryBatch(ctx, req, options); err == nil {
 		t.Fatal("changed DB identity accepted")

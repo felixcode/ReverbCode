@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -31,6 +32,26 @@ type peerKey struct{}
 func privateParent(path string) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("maintenance socket path must be canonical absolute")
+	}
+
+	mounts, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(mounts), "\n") {
+		parts := strings.SplitN(line, " - ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		left, right := strings.Fields(parts[0]), strings.Fields(parts[1])
+		if len(left) < 5 || len(right) < 1 {
+			continue
+		}
+		remote := right[0] == "nfs" || right[0] == "nfs4" || right[0] == "cifs" || right[0] == "smb3" || right[0] == "9p" || right[0] == "fuse.sshfs"
+		mount := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(left[4])
+		if remote && (path == mount || strings.HasPrefix(path, mount+"/")) {
+			return errors.New("remote maintenance socket path refused")
+		}
 	}
 	parent := filepath.Dir(path)
 	info, err := os.Lstat(parent)
@@ -173,12 +194,15 @@ func StartConfigured(s *store.Store) (*Server, error) {
 	for name, dst := range map[string]*time.Duration{"RETENTION_HOURS": &o.Retention, "STATEMENT_SECONDS": &o.ReadBudget, "TRANSACTION_SECONDS": &o.WriteBudget} {
 		if raw := os.Getenv("ALBANIA_AO_HISTORY_" + name); raw != "" {
 			v, e := strconv.ParseFloat(raw, 64)
-			if e != nil || v <= 0 || v > float64(1<<30) {
+			if e != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > float64(1<<30) {
 				return nil, errors.New("invalid maintenance duration")
 			}
 			unit := time.Second
 			if name == "RETENTION_HOURS" {
 				unit = time.Hour
+			}
+			if v > float64(math.MaxInt64)/float64(unit) {
+				return nil, errors.New("maintenance duration overflow")
 			}
 			*dst = time.Duration(v * float64(unit))
 		}

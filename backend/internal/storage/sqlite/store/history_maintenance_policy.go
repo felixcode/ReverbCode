@@ -107,7 +107,8 @@ func maintenanceTime(value string) (time.Time, error) {
 	}
 	if len(zone) > 1 {
 		h, e := strconv.Atoi(zone[1:3])
-		if e != nil || h > 23 {
+		minute, minuteErr := strconv.Atoi(zone[len(zone)-2:])
+		if e != nil || h > 23 || minuteErr != nil || minute > 59 {
 			return time.Time{}, maintenanceRetained("invalid_timestamp")
 		}
 	}
@@ -163,6 +164,14 @@ func maintenanceClosedOwner(ctx context.Context, db maintenanceDB, id string) (b
 		return false, err
 	}
 	for _, owner := range owners {
+		handoff, e := maintenancePendingSwitch(ctx, db, owner)
+		if e != nil || handoff {
+			return false, e
+		}
+		reviewing, e := maintenanceExists(ctx, db, `SELECT 1 FROM review_run WHERE session_id=? AND status='running' LIMIT 1`, owner)
+		if e != nil || reviewing {
+			return false, e
+		}
 		var terminated int
 		if err = db.QueryRowContext(ctx, `SELECT is_terminated FROM sessions WHERE id=?`, owner).Scan(&terminated); errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -235,10 +244,6 @@ func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceR
 		if err != nil || !old {
 			return false, err
 		}
-		closed, err := maintenanceClosedOwner(ctx, db, row.text("conversation_id"))
-		if err != nil {
-			return false, err
-		}
 		var ownerTerminated int
 		err = db.QueryRowContext(ctx, `SELECT is_terminated FROM sessions WHERE id=?`, row.text("session_id")).Scan(&ownerTerminated)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -249,6 +254,10 @@ func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceR
 			return false, err
 		}
 		if ownerTerminated == 1 {
+			closed, err := maintenanceClosedOwner(ctx, db, row.text("conversation_id"))
+			if err != nil {
+				return false, err
+			}
 			if closed {
 				return true, nil
 			}
@@ -264,11 +273,18 @@ func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceR
 			if err != nil {
 				return false, err
 			}
-			if !live && !pending && !handoff {
+			reviewing, e := maintenanceExists(ctx, db, `SELECT 1 FROM review_run WHERE session_id=? AND status='running' LIMIT 1`, row.text("session_id"))
+			if e != nil {
+				return false, e
+			}
+			if reviewing {
+				return false, maintenanceRetained("owner_review_running")
+			}
+			if !live && !pending && !handoff && !reviewing {
 				return true, nil
 			}
 		}
-		payload, err := maintenanceJSON(row.text("payload_json"))
+		payload, err := maintenanceJSONContext(ctx, row.text("payload_json"))
 		if err != nil {
 			return false, err
 		}
@@ -307,7 +323,7 @@ func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceR
 		if len(ids) != 1 {
 			return false, maintenanceRetained("raw_turn_unattributed")
 		}
-		turn, err = maintenanceRead(ctx, db, "conversation_turns", ids[0])
+		turn, err = maintenanceTurn(ctx, db, ids[0])
 		if err != nil {
 			return false, err
 		}
@@ -327,7 +343,7 @@ func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceR
 		if row.text("turn_id") == "" {
 			return maintenanceClosedOwner(ctx, db, row.text("conversation_id"))
 		}
-		turn, err = maintenanceRead(ctx, db, "conversation_turns", row.text("turn_id"))
+		turn, err = maintenanceTurn(ctx, db, row.text("turn_id"))
 		if err != nil {
 			return false, err
 		}
@@ -382,6 +398,10 @@ func maintenanceTruthy(v any) bool {
 
 // Decoder preserves numbers and rejects duplicate keys at every nesting level.
 func maintenanceJSON(value string) (any, error) {
+	return maintenanceJSONContext(context.Background(), value)
+}
+
+func maintenanceJSONContext(ctx context.Context, value string) (any, error) {
 	if !utf8.ValidString(value) || !maintenanceValidEscapes(value) {
 		return nil, maintenanceRetained("invalid_json")
 	}
@@ -389,6 +409,9 @@ func maintenanceJSON(value string) (any, error) {
 	d.UseNumber()
 	var parse func() (any, error)
 	parse = func() (any, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		tok, err := d.Token()
 		if err != nil {
 			return nil, maintenanceRetained("invalid_json")
@@ -529,4 +552,19 @@ func maintenanceUnicodeJSON(text string) string {
 		}
 	}
 	return out.String()
+}
+
+// Eligibility must not expand another object's diff/plan/prompt while holding
+// the writer. Only the lifecycle facts needed by this proof are selected.
+func maintenanceTurn(ctx context.Context, db maintenanceDB, id string) (maintenanceRow, error) {
+	var key, conv, owner, state string
+	var completed sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT id,conversation_id,handled_by_session_id,state,CAST(completed_at AS TEXT) FROM conversation_turns WHERE id=?`, id).Scan(&key, &conv, &owner, &state, &completed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return maintenanceRow{"id": key, "conversation_id": conv, "handled_by_session_id": owner, "state": state, "completed_at": completed.String}, nil
 }
