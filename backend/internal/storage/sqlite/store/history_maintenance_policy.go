@@ -30,25 +30,58 @@ type maintenanceDB interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func maintenanceRead(ctx context.Context, db maintenanceDB, table string, id any) (maintenanceRow, error) {
-	// table/key are selected exclusively by the closed maintenance stage registry.
-	columns := ""
+func maintenanceRead(ctx context.Context, db maintenanceDB, table string, id any, stages ...string) (maintenanceRow, error) {
+	stage := ""
+	if len(stages) > 0 {
+		stage = stages[0]
+	}
+	columns, err := maintenanceColumns(table, stage, true)
+	if err != nil {
+		return nil, err
+	}
+	return maintenanceReadColumns(ctx, db, table, id, columns)
+}
+func maintenanceMetadata(ctx context.Context, db maintenanceDB, table, stage string, id any) (maintenanceRow, error) {
+	columns, err := maintenanceColumns(table, stage, false)
+	if err != nil {
+		return nil, err
+	}
+	return maintenanceReadColumns(ctx, db, table, id, columns)
+}
+func maintenanceColumns(table, stage string, body bool) (string, error) {
+	meta := ""
+	fields := []string{}
 	switch table {
 	case "sessions":
-		columns = "id,is_terminated,prompt,CAST(updated_at AS TEXT) AS updated_at"
+		meta = "id,is_terminated,CAST(updated_at AS TEXT) AS updated_at"
+		fields = []string{"prompt"}
 	case "conversations":
-		columns = "id,scope,session_id,current_session_id"
+		meta = "id,scope,session_id,current_session_id"
 	case "conversation_turns":
-		columns = "id,conversation_id,handled_by_session_id,state,diff_json,plan_json,error_message,CAST(completed_at AS TEXT) AS completed_at"
+		meta = "id,conversation_id,handled_by_session_id,provider_turn_id,controller_generation,state,branch_id,CAST(completed_at AS TEXT) AS completed_at"
+		fields = []string{"diff_json", "plan_json", "error_message"}
 	case "conversation_provider_events":
-		columns = "id,conversation_id,session_id,payload_json,CAST(received_at AS TEXT) AS received_at"
+		meta = "id,conversation_id,session_id,provider_event_id,method,CAST(received_at AS TEXT) AS received_at"
+		fields = []string{"payload_json"}
 	case "conversation_messages":
-		columns = "id,conversation_id,turn_id,role,text,streaming,delivery_content_json,CAST(created_at AS TEXT) AS created_at"
+		meta = "id,conversation_id,turn_id,role,streaming,revision,branch_id,provider_item_id,client_message_id,client_payload_hash,CAST(created_at AS TEXT) AS created_at"
+		fields = []string{"text", "delivery_content_json"}
 	case "conversation_activities":
-		columns = "id,conversation_id,turn_id,kind,status,summary,detail_json,command_output,streamed_text,command_output_truncated,streamed_text_truncated,CAST(created_at AS TEXT) AS created_at"
+		meta = "id,conversation_id,turn_id,status,revision,branch_id,provider_item_id,request_id,command_output_truncated,streamed_text_truncated,CAST(created_at AS TEXT) AS created_at"
+		fields = []string{"command_output", "streamed_text"}
+		if stage != "outputs" {
+			meta += ",kind"
+			fields = append(fields, "summary", "detail_json")
+		}
 	default:
-		return nil, errors.New("unsupported maintenance row")
+		return "", errors.New("unsupported maintenance row")
 	}
+	if body && len(fields) > 0 {
+		meta += "," + strings.Join(fields, ",")
+	}
+	return meta, nil
+}
+func maintenanceReadColumns(ctx context.Context, db maintenanceDB, table string, id any, columns string) (maintenanceRow, error) {
 	rows, err := db.QueryContext(ctx, `SELECT `+columns+` FROM "`+table+`" WHERE id=?`, id)
 	if err != nil {
 		return nil, err
@@ -71,9 +104,6 @@ func maintenanceRead(ctx context.Context, db maintenanceDB, table string, id any
 	}
 	row := maintenanceRow{}
 	for i, v := range vals {
-		if b, ok := v.([]byte); ok {
-			v = string(b)
-		}
 		if s, ok := v.(string); ok && !utf8.ValidString(s) {
 			return nil, maintenanceRetained("invalid_utf8_text")
 		}
@@ -236,7 +266,7 @@ func maintenanceSessionClosed(ctx context.Context, db maintenanceDB, owner strin
 	}
 	return true, nil
 }
-func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceRow, stage string, cutoff time.Time) (bool, error) {
+func maintenanceEligibleWithProof(ctx context.Context, db maintenanceDB, row maintenanceRow, stage string, cutoff time.Time, proof *maintenanceRawProof) (bool, error) {
 	if stage == "session" {
 		old, err := maintenanceOld(row.text("updated_at"), cutoff, true)
 		if err != nil || !old || row.integer("is_terminated") != 1 {
@@ -290,20 +320,13 @@ func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceR
 				return true, nil
 			}
 		}
-		payload, err := maintenanceJSONContext(ctx, row.text("payload_json"))
-		if err != nil {
-			return false, err
+		if proof == nil {
+			return false, errors.New("unprepared raw proof")
 		}
-		obj, ok := payload.(map[string]any)
-		if !ok {
-			return false, maintenanceRetained("raw_not_object")
-		}
-		native, _ := obj["providerTurnId"].(string)
+		native := proof.native
 		if native == "" {
-			for _, key := range maintenanceBodyKeys {
-				if maintenanceTruthy(obj[key]) {
-					return false, maintenanceRetained("raw_turn_unattributed")
-				}
+			if proof.hasBody {
+				return false, maintenanceRetained("raw_turn_unattributed")
 			}
 			return true, nil
 		}
@@ -573,4 +596,16 @@ func maintenanceTurn(ctx context.Context, db maintenanceDB, id string) (maintena
 		return nil, err
 	}
 	return maintenanceRow{"id": key, "conversation_id": conv, "handled_by_session_id": owner, "state": state, "completed_at": completed.String}, nil
+}
+
+func maintenanceEligible(ctx context.Context, db maintenanceDB, row maintenanceRow, stage string, cutoff time.Time) (bool, error) {
+	var proof *maintenanceRawProof
+	if stage == "raw" {
+		var err error
+		proof, err = prepareMaintenanceRaw(ctx, row)
+		if err != nil {
+			return false, err
+		}
+	}
+	return maintenanceEligibleWithProof(ctx, db, row, stage, cutoff, proof)
 }

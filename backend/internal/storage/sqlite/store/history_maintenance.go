@@ -172,16 +172,12 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 			result.LogicalBytes = 0
 		}
 	}()
-
 	if s.readOnly {
 		return result, errors.New("read-only maintenance store")
 	}
 	if err = o.Validate(); err != nil {
 		return result, err
 	}
-
-	// A caller may lower the configured daemon ceilings for a small first pass,
-	// never raise them. Operational flags therefore do not require a restart.
 	if req.BatchRows < 0 || req.BatchBytes < 0 || req.MaxRowBytes < 0 || req.ReadBudgetNS < 0 || req.WriteBudgetNS < 0 {
 		return result, errors.New("invalid request limits")
 	}
@@ -194,6 +190,7 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 	if req.MaxRowBytes > 0 {
 		o.MaxRowBytes = min(o.MaxRowBytes, req.MaxRowBytes)
 	}
+	o.MaxRowBytes = min(o.MaxRowBytes, o.BatchBytes)
 	if req.ReadBudgetNS > 0 {
 		o.ReadBudget = min(o.ReadBudget, time.Duration(req.ReadBudgetNS))
 	}
@@ -212,63 +209,80 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 	if cutoff.After(now.Add(-o.Retention)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
-	cap := s.MaintenanceCapability(ctx)
-	if cap["schemaReady"] != true {
-		return result, errors.New("retention schema unavailable")
-	}
-	// Device/inode bind the private socket request to the database originally
-	// inspected by the scheduler. No arbitrary database path is accepted.
-	if fmt.Sprint(cap["dbDevice"]) != fmt.Sprint(req.DatabaseDevice) || fmt.Sprint(cap["dbInode"]) != fmt.Sprint(req.DatabaseInode) {
-		return result, errors.New("maintenance database identity changed")
-	}
-	readStarted := time.Now()
-	readCtx, cancelRead := context.WithTimeout(ctx, o.ReadBudget)
-	key, numeric, err := maintenanceKey(readCtx, s.readDB, stage)
-	if err != nil {
-		cancelRead()
-		return result, err
-	}
-	cursor := any(req.Cursor)
-	if numeric {
-		if req.Cursor == "" {
-			cursor = int64(0)
-		} else {
-			var v int64
-			if _, err = fmt.Sscan(req.Cursor, &v); err != nil || fmt.Sprint(v) != req.Cursor {
-				cancelRead()
-				return result, errors.New("invalid numeric cursor")
-			}
-			cursor = v
-		}
-	}
-	rows, err := s.readDB.QueryContext(readCtx, `SELECT "`+key+`" FROM "`+stage.table+`" WHERE "`+key+`">? ORDER BY "`+key+`" LIMIT ?`, cursor, o.BatchRows)
-	if err != nil {
-		cancelRead()
-		return result, err
-	}
-	ids := []any{}
-	for rows.Next() {
-		var id any
-		if err = rows.Scan(&id); err != nil {
-			break
-		}
-		ids = append(ids, id)
-	}
-	if err == nil {
-		err = rows.Err()
-	}
-	rows.Close()
-	cancelRead()
-	result.ReadMS = maintenanceMillis(readStarted)
-	if err != nil {
-		return result, err
-	}
-	if len(ids) == 0 {
-		result.Status = "ok"
-		result.Complete = true
-		result.NextCursor = ""
+	// Separate, non-queued admission bounds all reader/CPU preparation memory.
+	// It never reserves the business writer while a reader or JSON decoder waits.
+	if !s.maintenanceBusy.CompareAndSwap(false, true) {
+		result.Retained["maintenance_busy"]++
 		return result, nil
 	}
+	defer s.maintenanceBusy.Store(false)
+	readStarted := time.Now()
+	readCtx, cancelRead := context.WithTimeout(ctx, o.ReadBudget)
+	var key string
+	var plans []maintenancePrepared
+	func() {
+		defer cancelRead()
+		defer func() { result.ReadMS = maintenanceMillis(readStarted) }()
+		cap := s.MaintenanceCapability(readCtx)
+		if cap["schemaReady"] != true {
+			err = errors.New("retention schema unavailable")
+			return
+		}
+		if fmt.Sprint(cap["dbDevice"]) != fmt.Sprint(req.DatabaseDevice) || fmt.Sprint(cap["dbInode"]) != fmt.Sprint(req.DatabaseInode) {
+			err = errors.New("maintenance database identity changed")
+			return
+		}
+		var numeric bool
+		key, numeric, err = maintenanceKey(readCtx, s.readDB, stage)
+		if err != nil {
+			return
+		}
+		cursor := any(req.Cursor)
+		if numeric {
+			if req.Cursor == "" {
+				cursor = int64(0)
+			} else {
+				var v int64
+				if _, err = fmt.Sscan(req.Cursor, &v); err != nil || fmt.Sprint(v) != req.Cursor {
+					err = errors.New("invalid numeric cursor")
+					return
+				}
+				cursor = v
+			}
+		}
+		rows, e := s.readDB.QueryContext(readCtx, `SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>? ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`, cursor, o.BatchRows)
+		if e != nil {
+			err = e
+			return
+		}
+		ids := []any{}
+		for rows.Next() {
+			var id any
+			if err = rows.Scan(&id); err != nil {
+				break
+			}
+			ids = append(ids, id)
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		rows.Close()
+		if err != nil {
+			return
+		}
+		if len(ids) == 0 {
+			result.Complete = true
+			result.NextCursor = ""
+			result.Status = "ok"
+			return
+		}
+		plans, err = prepareMaintenanceRows(readCtx, s.readDB, stage, req.Stage, key, ids, o, now, cutoff)
+	}()
+	if err != nil || result.Complete {
+		return result, err
+	}
+	// Every preparation SELECT is closed above. No read snapshot is pinned while
+	// waiting for the business writer, and no parsing/hash work occurs below.
 	waitStarted := time.Now()
 	if !s.writeMu.TryMaintenance() {
 		result.WaitMS = maintenanceMillis(waitStarted)
@@ -286,13 +300,13 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 	}
 	defer connection.Close()
 	err = withMaintenanceConnection(writeCtx, connection, &result, func() error {
-		tx, err := connection.BeginTx(writeCtx, nil)
+		tx, e := connection.BeginTx(writeCtx, nil)
 		result.WaitMS = maintenanceMillis(waitStarted)
-		if err != nil {
-			return err
+		if e != nil {
+			return e
 		}
-		heldStarted := time.Now()
-		defer func() { result.HeldMS = maintenanceMillis(heldStarted) }()
+		heldAt := time.Now()
+		defer func() { result.HeldMS = maintenanceMillis(heldAt) }()
 		result.CommitState = "open"
 		defer func() {
 			rollbackErr := tx.Rollback()
@@ -304,130 +318,38 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 				}
 			}
 		}()
-		used := int64(0)
-		for _, id := range ids {
+		if e = validateHistoryRetentionSchema(writeCtx, tx); e != nil {
+			return e
+		}
+		if e = validateMaintenancePolicy(writeCtx, tx); e != nil {
+			return e
+		}
+		for _, plan := range plans {
 			if writeCtx.Err() != nil {
 				break
 			}
-			// Never start another object once a business operation is waiting.
 			if s.writeMu.BusinessWaiting() {
 				break
 			}
-			if !stage.builtin {
-				marked, e := maintenanceExists(writeCtx, tx, `SELECT 1 FROM ao_history_retention WHERE object_kind=? AND object_id=?`, stage.kind, maintenanceID(id))
-				if e != nil {
-					return e
-				}
-				if marked {
-					result.Scanned++
-					result.NextCursor = maintenanceID(id)
-					result.Retained["already_expired"]++
-					continue
-				}
-				sizeExpr := []string{}
-				for _, f := range stage.fields {
-					sizeExpr = append(sizeExpr, `COALESCE(octet_length("`+f+`"),0)`)
-				}
-				var size int64
-				e = tx.QueryRowContext(writeCtx, `SELECT `+strings.Join(sizeExpr, "+")+` FROM "`+stage.table+`" WHERE id=?`, id).Scan(&size)
-				if errors.Is(e, sql.ErrNoRows) {
-					result.Scanned++
-					result.NextCursor = maintenanceID(id)
-					continue
-				}
-				if e != nil {
-					return e
-				}
-				if size > o.MaxRowBytes {
-					result.Retained["row_size_limit"]++
-					result.Scanned++
-					result.NextCursor = maintenanceID(id)
-					continue
-				}
-				if used+size > o.BatchBytes {
-					break
-				}
-				used += size
-			}
-			if stage.builtin {
-				changed, e := maintenanceBuiltin(writeCtx, tx, stage, key, id, cutoff, now)
-				if e != nil {
-					if !maintenanceRetain(&result, e) {
-						return e
-					}
-				} else if changed {
-					result.Deleted++
-				}
-			} else {
-				row, e := maintenanceRead(writeCtx, tx, stage.table, id)
-				if e != nil {
-					if !maintenanceRetain(&result, e) {
-						return e
-					}
-				} else if row != nil {
-					eligible, e := maintenanceEligible(writeCtx, tx, row, req.Stage, cutoff)
-					if e != nil {
-						if !maintenanceRetain(&result, e) {
-							return e
-						}
-					} else if !eligible {
-						result.Retained["protected_owner_or_turn"]++
-					} else {
-						updates, fields, e := maintenanceTransform(writeCtx, row, req.Stage, now.Format(time.RFC3339Nano), cutoff.Format(time.RFC3339Nano))
-						if e != nil {
-							if !maintenanceRetain(&result, e) {
-								return e
-							}
-						} else {
-							if len(fields) > 0 {
-								keys := []string{}
-								for k := range updates {
-									keys = append(keys, k)
-								}
-								sort.Strings(keys)
-								assign := []string{}
-								args := []any{}
-								for _, k := range keys {
-									assign = append(assign, `"`+k+`"=?`)
-									args = append(args, updates[k])
-								}
-								if req.Stage == "message" || req.Stage == "activity" || req.Stage == "outputs" {
-									assign = append(assign, "revision=revision+1")
-								}
-								args = append(args, id)
-								if _, e = tx.ExecContext(writeCtx, `UPDATE "`+stage.table+`" SET `+strings.Join(assign, ",")+` WHERE id=?`, args...); e != nil {
-									return e
-								}
-								for k, v := range updates {
-									result.LogicalBytes += int64(len(row.text(k)) - len(fmt.Sprint(v)))
-								}
-								result.Compacted++
-							} else {
-								result.Audited++
-							}
-							n, e := maintenanceMarker(writeCtx, tx, row, req.Stage, fields, now.Format(time.RFC3339Nano), cutoff.Format(time.RFC3339Nano))
-							if e != nil {
-								return e
-							}
-							result.Markers += n
-						}
-					}
-				}
+			advanced, e := applyMaintenancePrepared(writeCtx, tx, stage, req.Stage, key, plan, cutoff, now, &result)
+			if e != nil {
+				return e
 			}
 			result.Scanned++
-			result.NextCursor = maintenanceID(id)
+			if !advanced {
+				break
+			}
+			result.NextCursor = maintenanceID(plan.id)
 		}
-		// A canceled SQL/transaction is failed, not a successful partial batch. The
-		// caller must not advance its durable cursor from an uncommitted response.
-		if err = writeCtx.Err(); err != nil {
-			return err
+		if e = writeCtx.Err(); e != nil {
+			return e
 		}
-		commitStarted := time.Now()
+		commitAt := time.Now()
 		result.CommitState = "unknown"
-		if err = tx.Commit(); err != nil {
-			return err
+		if e = tx.Commit(); e != nil {
+			return e
 		}
-		result.CommitMS = maintenanceMillis(commitStarted)
+		result.CommitMS = maintenanceMillis(commitAt)
 		result.Committed = true
 		result.CommitState = "committed"
 		result.Status = "ok"
@@ -435,6 +357,7 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 	})
 	return result, err
 }
+
 func maintenanceTransform(ctx context.Context, row maintenanceRow, stage, at, cutoff string) (map[string]any, []string, error) {
 	out := map[string]any{}
 	switch stage {
@@ -531,29 +454,29 @@ func maintenanceTransform(ctx context.Context, row maintenanceRow, stage, at, cu
 	sort.Strings(fields)
 	return out, fields, nil
 }
-func maintenanceMarker(ctx context.Context, tx *sql.Tx, row maintenanceRow, stage string, fields []string, at, cutoff string) (int64, error) {
+func prepareMaintenanceAudits(ctx context.Context, row maintenanceRow, stage string, fields []string, at, cutoff string) ([]maintenanceAudit, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	body := map[string]string{}
 	if stage == "raw" {
 		body["payload_json"] = row.text("payload_json")
 	} else {
-		for _, k := range fields {
-			body[k] = row.text(k)
+		for _, name := range fields {
+			body[name] = row.text(name)
 		}
 	}
-	bytes := 0
-	for _, v := range body {
-		bytes += len(v)
+	bytes := int64(0)
+	for _, value := range body {
+		bytes += int64(len(value))
 	}
 	original, err := maintenanceCanonical(body)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	fieldJSON, err := maintenanceCanonical(fields)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	semantic, prompt := "", ""
 	if stage == "message" {
@@ -565,26 +488,31 @@ func maintenanceMarker(ctx context.Context, tx *sql.Tx, row maintenanceRow, stag
 	if stage == "activity" {
 		semantic = maintenanceHash(strings.Join([]string{row.text("kind"), row.text("status"), row.text("summary"), row.text("detail_json")}, "\x00"))
 	}
-	kind := maintenanceStages[stage].kind
-	conv := row.text("conversation_id")
-	res, err := tx.ExecContext(ctx, `INSERT INTO ao_history_retention(object_kind,object_id,conversation_id,semantic_sha256,prompt_sha256,original_bytes,original_sha256,expired_at,cutoff_at,fields_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(object_kind,object_id) DO NOTHING`, kind, maintenanceID(row["id"]), conv, semantic, prompt, bytes, maintenanceHash(original), at, cutoff, fieldJSON)
-	if err != nil {
-		return 0, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
+	audit := maintenanceAudit{kind: maintenanceStages[stage].kind, id: maintenanceID(row["id"]), conversation: row.text("conversation_id"), semantic: semantic, prompt: prompt, originalSHA: maintenanceHash(original), at: at, cutoff: cutoff, fields: fieldJSON, bytes: bytes}
+	audits := []maintenanceAudit{audit}
 	if stage == "message" && row.text("role") == "user" && maintenanceCoordination(row.text("text")) {
-		res, err = tx.ExecContext(ctx, `INSERT INTO ao_history_retention(object_kind,object_id,conversation_id,semantic_sha256,prompt_sha256,original_bytes,original_sha256,expired_at,cutoff_at,fields_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(object_kind,object_id) DO NOTHING`, "message_coordination", maintenanceID(row["id"]), conv, semantic, prompt, bytes, maintenanceHash(original), at, cutoff, `["coordination"]`)
+		audit.kind = "message_coordination"
+		audit.fields = `["coordination"]`
+		audits = append(audits, audit)
+	}
+	return audits, ctx.Err()
+}
+func insertMaintenanceAudits(ctx context.Context, tx *sql.Tx, audits []maintenanceAudit) (int64, error) {
+	n := int64(0)
+	for _, a := range audits {
+		result, err := tx.ExecContext(ctx, `INSERT INTO ao_history_retention(object_kind,object_id,conversation_id,semantic_sha256,prompt_sha256,original_bytes,original_sha256,expired_at,cutoff_at,fields_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(object_kind,object_id) DO NOTHING`, a.kind, a.id, a.conversation, a.semantic, a.prompt, a.bytes, a.originalSHA, a.at, a.cutoff, a.fields)
 		if err != nil {
 			return 0, err
 		}
-		m, e := res.RowsAffected()
-		return n + m, e
+		added, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		n += added
 	}
 	return n, nil
 }
+
 func maintenanceCoordination(text string) bool {
 	value := strings.TrimSpace(text)
 	return maintenanceDelivery(value) || strings.HasPrefix(value, "<ao-handoff-request") || strings.HasPrefix(value, "AO transferred the previous agent's context in hidden system instructions.")
@@ -669,15 +597,27 @@ func maintenanceDelivery(text string) bool { _, ok := domain.CoordinationDeliver
 
 func (s *Store) MaintenanceCapability(ctx context.Context) map[string]any {
 	cap := s.historyRetentionCapability(ctx)
-	var encoding string
-	if err := s.readDB.QueryRowContext(ctx, "PRAGMA encoding").Scan(&encoding); err != nil || encoding != "UTF-8" {
-		cap["schemaReady"] = false
-	}
-	var version int
-	if err := s.readDB.QueryRowContext(ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied=1`).Scan(&version); err != nil || (version != 191 && version != 192) {
+	if err := validateMaintenancePolicy(ctx, s.readDB); err != nil {
 		cap["schemaReady"] = false
 	}
 	return cap
+}
+func validateMaintenancePolicy(ctx context.Context, db maintenanceDB) error {
+	var encoding string
+	if err := db.QueryRowContext(ctx, "PRAGMA encoding").Scan(&encoding); err != nil {
+		return err
+	}
+	if encoding != "UTF-8" {
+		return errors.New("unsupported maintenance encoding")
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied=1`).Scan(&version); err != nil {
+		return err
+	}
+	if version != 191 && version != 192 {
+		return errors.New("unsupported maintenance schema")
+	}
+	return nil
 }
 
 // Register recovery before changing any connection-local setting. Even a driver

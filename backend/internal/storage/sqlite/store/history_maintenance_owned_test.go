@@ -75,6 +75,12 @@ func TestOwnedMaintenanceTerminalAndBusyProtection(t *testing.T) {
 		t.Fatal("byte metadata bound", oversized, oversizeErr)
 	}
 	req.MaxRowBytes = 0
+	req.BatchBytes = 1
+	tooSmall, smallErr := s.MaintainHistoryBatch(ctx, req, options)
+	if smallErr != nil || tooSmall.Scanned != 2 || tooSmall.NextCursor == "" || tooSmall.Compacted != 0 {
+		t.Fatal("first row batch budget made no progress", tooSmall, smallErr)
+	}
+	req.BatchBytes = 0
 	result, err := s.MaintainHistoryBatch(ctx, req, options)
 	if err != nil || !result.Committed || result.Compacted != 1 {
 		t.Fatalf("batch: %+v %v", result, err)

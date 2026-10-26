@@ -51,7 +51,7 @@ be read/previewed without modification by the separate scheduler component.
 
 ## Coordination and proof
 
-Candidate PK reads finish before writer admission. Maintenance never queues on
+A separate non-queued single-maintenance admission bounds preparation memory before any DB query. Candidate PK/body reads, strict parsing, transformation, and full marker/fingerprint hashing finish before writer admission. Autocommit reader queries are closed before writeMu is requested; no read snapshot is held while waiting. Maintenance never queues on
 `writeMu`: an active or already waiting business writer yields a deferred result.
 After admission, pending business writers stop the batch at its next object
 boundary. Each batch releases its single writer connection and token; the
@@ -66,8 +66,7 @@ business writers with maintenance's busy policy. Business timeout/retry/ACK
 settings are unchanged. Cleanup shares the original write deadline rather than
 starting another wait window.
 
-Inside the AO immediate transaction, rows are fetched fresh and eligibility is
-rechecked using the same transaction: age with nanoseconds, terminal state,
+Inside the AO immediate transaction, only small headers/relations are fetched fresh. Exact original-value CAS binds the reader-prepared body (and its raw native proof) to the current record; identity/semantic/revision/branch differences are retained for re-preparation, not marked cleared. Eligibility is rechecked using the same transaction: age with nanoseconds, terminal state,
 queued/running, pending input/approval, session/branch ownership, handoff and
 closed-owner review protections. Unproven/malformed objects are retained.
 No snapshot read or cached Python proof is treated as mutation authorization.
@@ -83,9 +82,8 @@ remain counted if a subsequent connection restoration requires discard.
 
 `held_ms` measures the SQLite transaction (including rollback). `writer_reserved_ms`
 measures the complete AO writer reservation, including connection acquisition,
-rollback, restoration/discard and close. `wait_ms`, `read_ms` (candidate selection),
-`commit_ms`, maximums and defer counts are separate. JSON parsing cooperatively
-checks the same deadline; byte/row limits bound individual work. Actual elapsed
+rollback, restoration/discard and close. `wait_ms`, `read_ms` (bounded preparation, including hashing),
+`commit_ms`, maximums and defer counts are separate. JSON parsing cooperatively checks the reader deadline outside the business writer; canonical encoding and hashing also run there. Byte/row limits bound preparation. The writer does not reparse/canonicalize/hash bodies, only SQLite CAS comparisons and fresh small relationship checks. Actual elapsed
 times remain evidence, not hard latency guarantees.
 
 ## Settings
@@ -110,3 +108,5 @@ current host/queue facts. Root owns rollout, host/native/input proofs and any
 separately controlled physical compaction.
 
 Byte admission uses [SQLite octet_length(column)](https://www.sqlite.org/lang_corefunc.html#octet_length), which obtains TEXT/BLOB byte lengths from record metadata without reading the content. Maintenance requires UTF-8 so the budget and semantic UTF-8 hash units agree. Only fixed necessary stage/lifecycle columns are loaded; another object's unrelated large prompt/diff is not selected for qualification.
+
+The effective maximum row bytes is clamped to the batch byte budget. An oversized first record is retained and reported rather than causing a permanent zero-progress prefix. Outputs use their own projection: unrelated activity summary/detail bodies are not selected or charged as output data. Builtin deletion preparation retains exact bounded original column bytes for CAS; fresh installed janitor predicates remain authoritative in the write transaction.

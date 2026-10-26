@@ -28,6 +28,7 @@ type Store struct {
 	writeMu                *contextMutex
 	readOnly               bool
 	historyRetentionAbsent bool
+	maintenanceBusy        atomic.Bool
 
 	agentSwitchFailureEventMetadata *domain.AgentSwitchEventMetadata
 	agentSwitchFailureEventEncoder  ports.AgentSwitchFailureEventEncoder
