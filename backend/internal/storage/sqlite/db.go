@@ -55,6 +55,10 @@ func databaseURI(dataDir string) string {
 	return "file:" + file.EscapedPath()
 }
 
+// Reserve the WAL writer before a transaction reads its owner/retention facts.
+// Keep this option off reader and read-only pools, including nil-option reads.
+func writerDSN(dsn string) string { return dsn + "&_txlock=immediate" }
+
 // An older raw file: URI may have stored this directory's data elsewhere. Do
 // not silently replace that database with an empty one after fixing the URI.
 func checkLegacyDatabasePath(dataDir string) error {
@@ -132,7 +136,7 @@ func Open(dataDir string) (*Store, error) {
 	}
 	dsn := databaseURI(dataDir) + pragmas
 
-	writeDB, err := sql.Open("sqlite", dsn)
+	writeDB, err := sql.Open("sqlite", writerDSN(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite writer: %w", err)
 	}
@@ -266,7 +270,7 @@ func OpenPreMigrated(dataDir string) (*Store, error) {
 
 	dsn := databaseURI(dataDir) + pragmas
 
-	writeDB, err := sql.Open("sqlite", dsn)
+	writeDB, err := sql.Open("sqlite", writerDSN(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite writer: %w", err)
 	}

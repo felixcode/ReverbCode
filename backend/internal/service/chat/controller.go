@@ -2685,20 +2685,26 @@ func (c *Controller) project() {
 		if lifecycle {
 			c.sendMu.Lock()
 		}
+		projectionStarted := time.Now()
+		attempts := 1
 		projected, primaryTurn, err := c.projectEvent(ctx, event)
 		// A terminal receipt compacts the entire prompt, so it cannot pass a
 		// failed earlier projection. Retry transient store errors in order; if
 		// still failing, detach and leave the journal for a replacement controller.
 		for attempt := 0; err != nil && persistent && attempt < 3; attempt++ {
 			time.Sleep(20 * time.Millisecond)
+			attempts++
 			projected, primaryTurn, err = c.projectEvent(ctx, event)
 		}
+		failedStage := "projection"
 		if err == nil && persistent && event.ProviderEventID != "" {
+			failedStage = "ack"
 			err = acknowledger.AcknowledgeProviderEvent(ctx, event.ProviderEventID)
 		}
 		if err != nil && persistent {
-			c.log.Error("persistent chat projection stopped; provider retained for replay",
-				"session", c.sessionID, "kind", event.Kind, "error", err)
+			fields := []any{"session", c.sessionID, "kind", event.Kind, "error", err}
+			fields = append(fields, projectionFailureLogFields(err, failedStage, attempts, time.Since(projectionStarted))...)
+			c.log.Error("persistent chat projection stopped; provider retained for replay", fields...)
 			c.mu.Lock()
 			c.preserveProviderOnStop = true
 			c.state = ports.ChatControllerStopped
