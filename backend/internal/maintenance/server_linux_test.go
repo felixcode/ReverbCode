@@ -4,6 +4,7 @@ package maintenance
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -50,6 +51,35 @@ func TestUnixPrivateMaintenance(t *testing.T) {
 	response.Body.Close()
 	if err != nil || cap["maintenanceProtocol"] != float64(1) || cap["schemaReady"] != true {
 		t.Fatal(cap, err)
+	}
+	// End-to-end typed Unix request performs a genuine eligible write, not
+	// merely a zero-change scan/capability probe.
+	db, e := sql.Open("sqlite", filepath.Join(dir, "ao.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	if _, e = db.Exec(`INSERT INTO telemetry_event(id,occurred_at,name,source,level,payload_json)VALUES('old','2020-01-01T00:00:00Z','synthetic','synthetic','info','{}')`); e != nil {
+		t.Fatal(e)
+	}
+	identity := s.HistoryRetentionCapability()
+	requestBody, e := json.Marshal(adapter.HistoryMaintenanceRequest{Stage: "builtin:telemetry_event", Cutoff: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano), DatabaseDevice: identity["dbDevice"].(uint64), DatabaseInode: identity["dbInode"].(uint64), BatchRows: 1})
+	if e != nil {
+		t.Fatal(e)
+	}
+	posted, e := client.Post("http://localhost/v1/history/batch", "application/json", strings.NewReader(string(requestBody)))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var changed map[string]any
+	e = json.NewDecoder(posted.Body).Decode(&changed)
+	posted.Body.Close()
+	if e != nil || posted.StatusCode != 200 || changed["deleted"] != float64(1) || changed["transaction_committed"] != true || changed["commit_state"] != "committed" {
+		t.Fatal("typed write smoke", changed, e)
+	}
+	var remaining int
+	if e = db.QueryRow(`SELECT count(*) FROM telemetry_event`).Scan(&remaining); e != nil || remaining != 0 {
+		t.Fatal("eligible row not deleted", e)
 	}
 	for _, header := range []string{"Origin", "Forwarded", "X-Forwarded-For"} {
 		req, _ := http.NewRequest("GET", "http://localhost/v1/capability", nil)

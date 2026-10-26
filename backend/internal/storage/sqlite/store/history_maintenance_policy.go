@@ -32,18 +32,24 @@ type maintenanceDB interface {
 
 func maintenanceRead(ctx context.Context, db maintenanceDB, table string, id any) (maintenanceRow, error) {
 	// table/key are selected exclusively by the closed maintenance stage registry.
-	extra := ""
+	columns := ""
 	switch table {
 	case "sessions":
-		extra = ",CAST(updated_at AS TEXT) AS updated_at"
+		columns = "id,is_terminated,prompt,CAST(updated_at AS TEXT) AS updated_at"
+	case "conversations":
+		columns = "id,scope,session_id,current_session_id"
 	case "conversation_turns":
-		extra = ",CAST(completed_at AS TEXT) AS completed_at"
+		columns = "id,conversation_id,handled_by_session_id,state,diff_json,plan_json,error_message,CAST(completed_at AS TEXT) AS completed_at"
 	case "conversation_provider_events":
-		extra = ",CAST(received_at AS TEXT) AS received_at"
-	case "conversation_messages", "conversation_activities":
-		extra = ",CAST(created_at AS TEXT) AS created_at"
+		columns = "id,conversation_id,session_id,payload_json,CAST(received_at AS TEXT) AS received_at"
+	case "conversation_messages":
+		columns = "id,conversation_id,turn_id,role,text,streaming,delivery_content_json,CAST(created_at AS TEXT) AS created_at"
+	case "conversation_activities":
+		columns = "id,conversation_id,turn_id,kind,status,summary,detail_json,command_output,streamed_text,command_output_truncated,streamed_text_truncated,CAST(created_at AS TEXT) AS created_at"
+	default:
+		return nil, errors.New("unsupported maintenance row")
 	}
-	rows, err := db.QueryContext(ctx, `SELECT *`+extra+` FROM "`+table+`" WHERE id=?`, id)
+	rows, err := db.QueryContext(ctx, `SELECT `+columns+` FROM "`+table+`" WHERE id=?`, id)
 	if err != nil {
 		return nil, err
 	}

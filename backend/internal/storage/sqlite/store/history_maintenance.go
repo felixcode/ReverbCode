@@ -326,7 +326,7 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 				}
 				sizeExpr := []string{}
 				for _, f := range stage.fields {
-					sizeExpr = append(sizeExpr, `COALESCE(length(CAST("`+f+`" AS BLOB)),0)`)
+					sizeExpr = append(sizeExpr, `COALESCE(octet_length("`+f+`"),0)`)
 				}
 				var size int64
 				e = tx.QueryRowContext(writeCtx, `SELECT `+strings.Join(sizeExpr, "+")+` FROM "`+stage.table+`" WHERE id=?`, id).Scan(&size)
@@ -669,6 +669,10 @@ func maintenanceDelivery(text string) bool { _, ok := domain.CoordinationDeliver
 
 func (s *Store) MaintenanceCapability(ctx context.Context) map[string]any {
 	cap := s.historyRetentionCapability(ctx)
+	var encoding string
+	if err := s.readDB.QueryRowContext(ctx, "PRAGMA encoding").Scan(&encoding); err != nil || encoding != "UTF-8" {
+		cap["schemaReady"] = false
+	}
 	var version int
 	if err := s.readDB.QueryRowContext(ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied=1`).Scan(&version); err != nil || (version != 191 && version != 192) {
 		cap["schemaReady"] = false

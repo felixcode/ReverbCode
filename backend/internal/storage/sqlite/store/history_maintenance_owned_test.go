@@ -57,10 +57,24 @@ func TestOwnedMaintenanceTerminalAndBusyProtection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var priorRevision, priorSequence, beforeCDC int64
+	var priorClient, priorPayload, priorBranch string
+	if err = db.QueryRow(`SELECT revision,sequence,client_message_id,client_payload_hash,branch_id FROM conversation_messages WHERE id='old'`).Scan(&priorRevision, &priorSequence, &priorClient, &priorPayload, &priorBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM change_log`).Scan(&beforeCDC); err != nil {
+		t.Fatal(err)
+	}
 	cap := s.HistoryRetentionCapability()
 	options := adapter.DefaultHistoryMaintenanceOptions()
 	options.WriteBudget = time.Second
 	req := adapter.HistoryMaintenanceRequest{Stage: "message", Cutoff: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano), DatabaseDevice: cap["dbDevice"].(uint64), DatabaseInode: cap["dbInode"].(uint64)}
+	req.MaxRowBytes = 1
+	oversized, oversizeErr := s.MaintainHistoryBatch(ctx, req, options)
+	if oversizeErr != nil || oversized.Compacted != 0 || oversized.Markers != 0 || oversized.Retained["row_size_limit"] != 2 {
+		t.Fatal("byte metadata bound", oversized, oversizeErr)
+	}
+	req.MaxRowBytes = 0
 	result, err := s.MaintainHistoryBatch(ctx, req, options)
 	if err != nil || !result.Committed || result.Compacted != 1 {
 		t.Fatalf("batch: %+v %v", result, err)
@@ -75,6 +89,23 @@ func TestOwnedMaintenanceTerminalAndBusyProtection(t *testing.T) {
 	if old != "[AO history expired]" || busy != "UNIQUE-EXPIRED-SENTINEL" {
 		t.Fatal("active content changed")
 	}
+	var afterRevision, afterSequence int64
+	var afterClient, afterPayload, afterBranch string
+	if err = db.QueryRow(`SELECT revision,sequence,client_message_id,client_payload_hash,branch_id FROM conversation_messages WHERE id='old'`).Scan(&afterRevision, &afterSequence, &afterClient, &afterPayload, &afterBranch); err != nil {
+		t.Fatal(err)
+	}
+	if afterRevision != priorRevision+1 || afterSequence != priorSequence || afterClient != priorClient || afterPayload != priorPayload || afterBranch != priorBranch {
+		t.Fatal("message identity/revision changed incorrectly")
+	}
+	var semantic string
+	if err = db.QueryRow(`SELECT semantic_sha256 FROM ao_history_retention WHERE object_kind='message' AND object_id='old'`).Scan(&semantic); err != nil || semantic != retentionHash("user\x00UNIQUE-EXPIRED-SENTINEL") {
+		t.Fatal("native semantic proof changed", err)
+	}
+	events, e := s.EventsAfter(ctx, beforeCDC, 100)
+	if e != nil || len(events) != 1 {
+		t.Fatal("original CDC path changed", len(events), e)
+	}
+
 	result, err = s.MaintainHistoryBatch(ctx, req, options)
 	if err != nil || result.Compacted != 0 || result.Markers != 0 {
 		t.Fatal("idempotence", result, err)

@@ -108,3 +108,5 @@ required after any projection redaction; never put an old incompatible binary
 against the already-redacted live database, and never restore a whole old DB over
 current host/queue facts. Root owns rollout, host/native/input proofs and any
 separately controlled physical compaction.
+
+Byte admission uses [SQLite octet_length(column)](https://www.sqlite.org/lang_corefunc.html#octet_length), which obtains TEXT/BLOB byte lengths from record metadata without reading the content. Maintenance requires UTF-8 so the budget and semantic UTF-8 hash units agree. Only fixed necessary stage/lifecycle columns are loaded; another object's unrelated large prompt/diff is not selected for qualification.
