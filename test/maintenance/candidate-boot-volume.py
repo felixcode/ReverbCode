@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
+import sys
 import stat
 import types
 import uuid
@@ -113,6 +115,7 @@ def execute(value, m):
         if (v["Name"] != volume or v["Driver"] != "local" or v.get("Options") or v.get("Labels", {}).get(m.LABEL) != run
                 or not re.fullmatch(r"[0-9a-f]{32}", nonce or "") or m.reference_ids(volume, control)):
             raise ValueError("new_boot_volume_identity")
+        print(json.dumps({"event": "private_boot_target_created", "run": run, "volume": volume, "volume_nonce": nonce}), file=sys.stderr, flush=True)
         target = "type=volume,src=" + volume + ",dst=/work,volume-nocopy"
         transient([*common("0:0"), "--cap-add", "CHOWN", "--mount", target, "--entrypoint", "/bin/sh", image, "-ec",
                    'test -z "$(ls -A /work)"; chmod 0700 /work; chown 1000:1000 /work'])
@@ -138,7 +141,7 @@ def execute(value, m):
                 or state["HostConfig"].get("PidMode") not in ("", "private")
                 or m.reference_ids(volume, control) != {cid} or m.reference_ids(source_volume, control) != {cid}):
             raise ValueError("boot_container_isolation_or_reference")
-        m.docker(["exec", cid, "/bin/sh", "-ec", 'umask 077; test ! -e /work/boot-approved; : > /work/boot-approved'], control)
+        m.docker(["exec", cid, "/bin/sh", "-ec", 'for b in codex claude; do if command -v "$b" >/dev/null 2>&1; then exit 17; fi; done; umask 077; test ! -e /work/boot-approved; : > /work/boot-approved'], control)
         if int(m.docker(["wait", cid], b["outer_seconds"])) != 0:
             raise ValueError("private_boot_test_failed")
         m.retire_container(cid, run, control, remove=True)
@@ -172,6 +175,10 @@ def main():
     args = p.parse_args()
     try:
         m = helper(args.helper)
+        def interrupted(*_):
+            raise m.CopyFailure("candidate_boot", "signal_interrupt")
+        signal.signal(signal.SIGTERM, interrupted)
+        signal.signal(signal.SIGINT, interrupted)
         value = m.load_manifest(args.request, args.request_sha256)
         request(value, m)
         print(json.dumps(execute(value, m) if args.apply else {"status": "plan_only", "helper_source": HELPER_REVISION}))
