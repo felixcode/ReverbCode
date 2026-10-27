@@ -138,6 +138,11 @@ func TestRebuiltEmptyApplicationDaemonBootSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := rebuildRecoveryFixture(t, sealRecoveryFixture(t, dir))
+	bootRecoveryData(t, binary, data, true)
+}
+
+func bootRecoveryData(t *testing.T, binary, data string, empty bool) {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -221,14 +226,18 @@ func TestRebuiltEmptyApplicationDaemonBootSmoke(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("fixture_daemon_stop_timeout")
 	}
+	if !empty {
+		t.Log("real_daemon_health=true real_daemon_ready=true graceful_stop=true fixture_empty=false native_replay=not_exercised")
+		return
+	}
 	closed, err := aosqlite.OpenReadOnly(context.Background(), data)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closed.Close()
 	sessions, err := closed.ListAllSessions(context.Background())
-	if err != nil || len(sessions) != 0 {
+	if err != nil || empty && len(sessions) != 0 {
 		t.Fatal("empty_boot_created_sessions", err)
 	}
-	t.Log("synthetic_empty_rebuilt_db=true real_daemon_health=true real_daemon_ready=true graceful_stop=true native_sessions=0 native_replay=not_exercised")
+	t.Logf("real_daemon_health=true real_daemon_ready=true graceful_stop=true fixture_empty=%t private_session_rows=%d native_replay=not_exercised", empty, len(sessions))
 }
