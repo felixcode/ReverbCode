@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -381,11 +380,12 @@ func maintenanceTransform(ctx context.Context, row maintenanceRow, stage, at, cu
 		if !ok {
 			return nil, nil, maintenanceRetained("raw_not_object")
 		}
-		if prev := obj["_retention"]; prev != nil {
+		if prev, present := obj["_retention"]; present {
 			m, ok := prev.(map[string]any)
-			if !ok || !(m["protocol"] == "ao-history-v1" || m["protocol"] == json.Number("1") && m["contentExpired"] == true) {
+			if !ok || m["protocol"] != "ao-history-v1" {
 				return nil, nil, maintenanceRetained("foreign_retention_marker")
 			}
+			return nil, nil, maintenanceRetained("unproven_inline_audit")
 		}
 		fields := []string{}
 		for _, key := range maintenanceBodyKeys {
@@ -409,10 +409,19 @@ func maintenanceTransform(ctx context.Context, row maintenanceRow, stage, at, cu
 				fields = append(fields, key)
 			}
 		}
+		for _, key := range maintenanceBodyKeys {
+			if maintenanceTruthy(obj[key]) {
+				return nil, nil, maintenanceRetained("unsupported_raw_body_type")
+			}
+		}
 		if len(fields) == 0 {
 			return out, fields, nil
 		}
-		obj["_retention"] = map[string]any{"protocol": "ao-history-v1", "expired_at": at, "cutoff_at": cutoff, "fields": fields, "original_bytes": len(row.text("payload_json")), "original_sha256": maintenanceHash(row.text("payload_json"))}
+		fieldMapSHA, err := rawFieldMapSHA(row.text("payload_json"))
+		if err != nil {
+			return nil, nil, err
+		}
+		obj["_retention"] = map[string]any{"field_map_audit": rawAuditBinding(row, fieldMapSHA), "protocol": "ao-history-v1", "expired_at": at, "cutoff_at": cutoff, "fields": fields, "original_bytes": len(row.text("payload_json")), "original_sha256": maintenanceHash(row.text("payload_json"))}
 		text, err := maintenanceCanonical(obj)
 		if err != nil {
 			return nil, nil, err
@@ -471,7 +480,8 @@ func prepareMaintenanceAudits(ctx context.Context, row maintenanceRow, stage str
 	}
 	body := map[string]string{}
 	if stage == "raw" {
-		body["payload_json"] = row.text("payload_json")
+		// Raw changes carry both audit digest domains inline. No mutation needs no durable audit.
+		return nil, nil
 	} else {
 		for _, name := range fields {
 			body[name] = row.text(name)
