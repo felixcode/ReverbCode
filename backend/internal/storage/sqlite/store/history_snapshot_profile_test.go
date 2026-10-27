@@ -196,7 +196,10 @@ func TestSnapshotPrepareProfileReadonly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	var low, high int64
-	if err = db.QueryRowContext(ctx, `SELECT min(id),max(id) FROM conversation_provider_events`).Scan(&low, &high); err != nil {
+	if err = db.QueryRowContext(ctx, `SELECT min(id) FROM conversation_provider_events`).Scan(&low); err != nil {
+		t.Fatal("profile_bounds")
+	}
+	if err = db.QueryRowContext(ctx, `SELECT max(id) FROM conversation_provider_events`).Scan(&high); err != nil {
 		t.Fatal("profile_bounds")
 	}
 	starts := []struct {
@@ -282,8 +285,8 @@ func TestSnapshotPrepareProfileReadonly(t *testing.T) {
 					t.Fatal("profile_plan")
 				}
 				details = append(details, detail)
-				scans += boolInt(strings.HasPrefix(detail, "SCAN "))
-				search += boolInt(strings.HasPrefix(detail, "SEARCH "))
+				scans += snapshotBoolCount(strings.HasPrefix(detail, "SCAN "))
+				search += snapshotBoolCount(strings.HasPrefix(detail, "SEARCH "))
 			}
 			explain.Close()
 			encoded, _ := json.Marshal(details)
@@ -300,7 +303,7 @@ func TestSnapshotPrepareProfileReadonly(t *testing.T) {
 	}
 	t.Log(fmt.Sprintf("source_reference_sha256=%s verified_by_parent_seal=true local_full_rehash=false", os.Getenv("AO_SNAPSHOT_PROFILE_SOURCE_SHA256")))
 }
-func boolInt(value bool) int {
+func snapshotBoolCount(value bool) int {
 	if value {
 		return 1
 	}
