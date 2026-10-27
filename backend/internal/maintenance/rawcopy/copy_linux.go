@@ -27,6 +27,8 @@ import (
 
 type Options struct {
 	Source, Directory       string
+	ExpectedSHA256           string
+	Progress                 func(string, int64)
 	Apply                   bool
 	MaxBytes                int64
 	Rows, MaxBatches        int
@@ -183,6 +185,7 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 	}
 	ctx, cancel := context.WithTimeout(parent, o.Budget)
 	defer cancel()
+	progress := func(stage string, n int64) { if o.Progress != nil { o.Progress(stage,n) } }
 	if filepath.Base(o.Source) == "ao.db" {
 		return report, errors.New("live_database_name_rejected")
 	}
@@ -218,6 +221,7 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 	if err != nil {
 		return report, err
 	}
+	progress("snapshot_copy",0)
 	hash := sha256.New()
 	buffer := make([]byte, 128<<10)
 	var copied int64
@@ -229,6 +233,7 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 		n, err = input.Read(buffer)
 		if n > 0 {
 			copied += int64(n)
+			progress("snapshot_copy",copied)
 			if copied > o.MaxBytes {
 				err = errors.New("copy_size_budget")
 				break
@@ -269,6 +274,9 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 	}
 	report.SourceSHA256 = hex.EncodeToString(hash.Sum(nil))
 	report.SourceBytes = copied
+	if o.ExpectedSHA256 != "" && report.SourceSHA256 != o.ExpectedSHA256 {
+		return report, errors.New("source_sha256_mismatch")
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return report, err
@@ -276,6 +284,7 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 	if !privateRegular(info) || os.SameFile(before, info) {
 		return report, errors.New("copy_identity_invalid")
 	}
+	progress("copy_identity_verified",copied)
 	report.PhysicalBytesBefore = info.Size()
 	// Exclusive reference proof is meaningful only for the brand new copy. This
 	// command has no path to apply to an existing AO file, even with a flag.
@@ -292,10 +301,12 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
+	progress("copy_quick_check",0)
 	var check string
 	if err = db.QueryRowContext(ctx, "PRAGMA quick_check(1)").Scan(&check); err != nil || check != "ok" {
 		return report, errors.New("copy_quick_check_failed")
 	}
+	progress("raw_audit_fold",0)
 	cursor := ""
 	for i := 0; i < o.MaxBatches; i++ {
 		batch, e := store.FoldRawAuditCopyBatch(ctx, db, cursor, store.RawAuditCopyOptions{BatchRows: o.Rows, MaxRowBytes: o.MaxRowBytes, BatchBytes: o.BatchBytes, Budget: o.BatchBudget, Apply: o.Apply})
@@ -303,6 +314,7 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 			return report, e
 		}
 		report.Scanned += batch.Scanned
+		progress("raw_audit_fold",report.Scanned)
 		report.Eligible += batch.Eligible
 		report.Migrated += batch.Migrated
 		report.Retained += batch.Retained

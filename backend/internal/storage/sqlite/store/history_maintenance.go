@@ -145,7 +145,21 @@ func maintenanceKey(ctx context.Context, db maintenanceDB, stage maintenanceStag
 // MaintainHistoryBatch is the sole mutation path. Candidate selection uses the
 // reader pool before attempting admission. Maintenance never queues ahead of
 // business writers, and never keeps its writer reservation between requests.
-func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenanceRequest, o HistoryMaintenanceOptions) (result HistoryMaintenanceResult, err error) {
+func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenanceRequest, o HistoryMaintenanceOptions) (HistoryMaintenanceResult, error) {
+	return s.maintainHistoryBatchAt(ctx, req, o, time.Now().UTC())
+}
+
+// MaintainHistorySnapshotBatch is only used by the copy-only offline runner.
+// A historical clock can restrict eligibility but cannot move it into the future.
+// This does not establish that an arbitrary database is offline or safe to write.
+func (s *Store) MaintainHistorySnapshotBatch(ctx context.Context, req HistoryMaintenanceRequest, o HistoryMaintenanceOptions, asOf time.Time) (HistoryMaintenanceResult, error) {
+	if asOf.IsZero() || asOf.After(time.Now().UTC()) {
+		return HistoryMaintenanceResult{Status: "failed", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}, errors.New("invalid historical snapshot clock")
+	}
+	return s.maintainHistoryBatchAt(ctx, req, o, asOf.UTC())
+}
+
+func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenanceRequest, o HistoryMaintenanceOptions, now time.Time) (result HistoryMaintenanceResult, err error) {
 	result = HistoryMaintenanceResult{Status: "deferred", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}
 	defer func() {
 		if err != nil {
@@ -204,7 +218,6 @@ func (s *Store) MaintainHistoryBatch(ctx context.Context, req HistoryMaintenance
 	if err != nil {
 		return result, err
 	}
-	now := time.Now().UTC()
 	if cutoff.After(now.Add(-o.Retention)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
