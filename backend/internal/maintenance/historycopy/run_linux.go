@@ -22,12 +22,13 @@ import (
 var stages = []string{"raw", "outputs", "message", "activity", "turn", "session", "builtin:change_log", "builtin:telemetry_event", "builtin:notifications", "builtin:agent_switch_failure_outbox", "builtin:agent_switch_failure_receipts"}
 
 type Options struct {
-	Copy        rawcopy.Options
-	AsOf        time.Time
-	Clean       bool
-	Maintenance store.HistoryMaintenanceOptions
-	MaxBatches  int
-	Progress    func(string, int64)
+	Copy            rawcopy.Options
+	AsOf            time.Time
+	Clean           bool
+	Maintenance     store.HistoryMaintenanceOptions
+	MaxBatches      int
+	Progress        func(string, int64)
+	PrewriteRetries int
 }
 type StageReport struct {
 	Prefix                    store.HistoryMaintenancePrefixCoverage `json:"prefix_coverage"`
@@ -46,6 +47,9 @@ type StageReport struct {
 	CommitState               string                                 `json:"last_commit_state"`
 	StopReason                string                                 `json:"stop_reason,omitempty"`
 	SQLiteCode                int                                    `json:"last_sqlite_code,omitempty"`
+	Retries                   int64                                  `json:"retries"`
+	LastAttempt               *BatchAttempt                          `json:"last_attempt,omitempty"`
+	LastFailedAttempt         *BatchAttempt                          `json:"last_failed_attempt,omitempty"`
 }
 type Pages struct {
 	DatabaseBytes int64 `json:"database_bytes"`
@@ -130,7 +134,7 @@ func saveReport(dir string, report Report) error {
 // private PID visibility alone is not an offline/live-data proof.
 func Run(parent context.Context, o Options) (report Report, err error) {
 	report = Report{Protocol: 1, Status: "failed", CleanRequested: o.Clean, Stages: []StageReport{}}
-	if !validSHA(o.Copy.ExpectedSHA256) || o.AsOf.IsZero() || o.AsOf.After(time.Now().UTC()) || o.MaxBatches <= 0 {
+	if !validSHA(o.Copy.ExpectedSHA256) || o.AsOf.IsZero() || o.AsOf.After(time.Now().UTC()) || o.MaxBatches <= 0 || o.PrewriteRetries < 0 {
 		return report, errors.New("invalid_copy_manifest")
 	}
 	if err = o.Maintenance.Validate(); err != nil {
@@ -255,14 +259,22 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 		}
 		r.CoverageVerified = true
 		cursor := ""
-		for batch := 0; batch < o.MaxBatches; batch++ {
+		for r.Batches < int64(o.MaxBatches) {
 			if ctx.Err() != nil {
 				r.StopReason = "wall_budget"
 				break
 			}
 			req := store.HistoryMaintenanceRequest{Stage: stage, Cursor: cursor, Cutoff: report.Cutoff, DatabaseDevice: device, DatabaseInode: inode}
-			result, e := s.MaintainHistorySnapshotBatch(ctx, req, o.Maintenance, o.AsOf)
-			r.Batches++
+			attempts := int64(0)
+			result, e := runBatch(ctx, req, o.Maintenance, o.AsOf, min(o.PrewriteRetries, o.MaxBatches-int(r.Batches)-1), s.MaintainHistorySnapshotBatch, func(a BatchAttempt) {
+				attempts++
+				r.LastAttempt = &a
+				if a.ErrorType != "" {
+					r.LastFailedAttempt = &a
+				}
+			})
+			r.Batches += attempts
+			r.Retries += attempts - 1
 			r.CommitState = result.CommitState
 			r.SQLiteCode = result.SQLiteCode
 			// Only confirmed results contribute to mutation counts. Unknown commit
@@ -299,6 +311,11 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 				break
 			}
 			cursor = result.NextCursor
+			if e := saveCheckpoint(o.Copy.Directory, report.SourceSHA256, report.AsOf, report.Cutoff, stage, cursor); e != nil {
+				r.StopReason = "checkpoint_failed"
+				report.Stages = append(report.Stages, r)
+				return report, e
+			}
 		}
 		if !r.Complete && r.StopReason == "" {
 			r.StopReason = "batch_budget"

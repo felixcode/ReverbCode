@@ -14,8 +14,9 @@ import (
 // transformations and fingerprint/canonical hashing finish before writeMu is
 // requested. Only fixed metadata and exact source CAS run in the writer.
 type maintenanceRawProof struct {
-	native  string
-	hasBody bool
+	native       string
+	hasBody      bool
+	hasRetention bool
 }
 type maintenanceAudit struct {
 	kind, id, conversation, semantic, prompt, originalSHA, at, cutoff, fields string
@@ -33,6 +34,7 @@ type maintenancePrepared struct {
 	fields        []string
 	audits        []maintenanceAudit
 	inlineExpired bool
+	noRawBody     bool
 	size          int64
 }
 
@@ -46,6 +48,7 @@ func prepareMaintenanceRaw(ctx context.Context, row maintenanceRow) (*maintenanc
 		return nil, maintenanceRetained("raw_not_object")
 	}
 	proof := &maintenanceRawProof{}
+	_, proof.hasRetention = obj["_retention"]
 	proof.native, _ = obj["providerTurnId"].(string)
 	for _, key := range maintenanceBodyKeys {
 		proof.hasBody = proof.hasBody || maintenanceTruthy(obj[key])
@@ -107,7 +110,7 @@ func maintenanceBuiltinOriginal(ctx context.Context, db maintenanceDB, stage mai
 	}
 	return row, nil
 }
-func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage maintenanceStage, stageName, key string, ids []any, o HistoryMaintenanceOptions, now, cutoff time.Time) ([]maintenancePrepared, error) {
+func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage maintenanceStage, stageName, key string, ids []any, o HistoryMaintenanceOptions, now, cutoff time.Time, rawNoBodyFastPath ...bool) ([]maintenancePrepared, error) {
 	columns := stage.fields
 	var err error
 	if stage.builtin {
@@ -195,9 +198,21 @@ func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage mainten
 		}
 		if stageName == "raw" {
 			p.proof, err = prepareMaintenanceRaw(ctx, p.row)
-			_, _, p.inlineExpired = rawInlineAudit(ctx, p.row, true)
+			// The first strict parse already proved whether a marker exists.
+			// Do not decode every unmarked metadata event a second time.
+			if err == nil && p.proof.hasRetention {
+				_, _, p.inlineExpired = rawInlineAudit(ctx, p.row, true)
+			}
 		}
 		if p.inlineExpired && err == nil {
+			plans = append(plans, p)
+			continue
+		}
+		// A well-formed raw object with no body has nothing to expire. Do not
+		// repeat owner/turn eligibility and transformation for metadata events.
+		// The writer still rechecks metadata + exact body CAS before advancing.
+		if len(rawNoBodyFastPath) > 0 && rawNoBodyFastPath[0] && stageName == "raw" && err == nil && !p.proof.hasBody && !p.proof.hasRetention {
+			p.noRawBody = true
 			plans = append(plans, p)
 			continue
 		}
@@ -337,6 +352,10 @@ func applyMaintenancePrepared(ctx context.Context, tx *sql.Tx, stage maintenance
 		}
 		if p.inlineExpired {
 			result.Retained["already_expired"]++
+			return true, nil
+		}
+		if p.noRawBody {
+			result.Retained["raw_no_body"]++
 			return true, nil
 		}
 		eligible, e := maintenanceEligibleWithProof(ctx, tx, current, stageName, cutoff, p.proof)

@@ -39,9 +39,10 @@ The first phase reuses the reviewed rawcopy fold. Then the exact new fixed file
 `NewStore`, with application foreign-key enforcement preserved; no migration or `EnsureSchema` path runs. Each batch calls the same
 application preparation, eligibility, original-value CAS, marker, writer admission,
 commit and ACK-related rules as the daemon. No simplified deletion predicates
-are introduced. The only store refactor passes a historical clock through the
-existing method body. The live wrapper still uses `time.Now()` and existing
-limits; no HTTP field or endpoint is added. Future/zero historical clocks fail.
+are introduced. The store wrapper passes a historical clock through the existing method body.
+The live wrapper still uses `time.Now()` and existing limits; no request field
+or endpoint is added. The raw no-body optimization below is enabled only by
+the snapshot method, never by the daemon wrapper. Future/zero historical clocks fail.
 
 Stage order is raw, outputs, message, activity, turn, session, change_log,
 telemetry_event, notifications, agent_switch_failure_outbox and
@@ -119,3 +120,55 @@ Do not run this example against a current AO path. Failed/partial working files
 remain private for owner inspection; this program performs no automatic deletion.
 Cleanup, candidate handoff, remote expiry and production shutdown are owned by
 the external reviewed executor and root.
+
+
+## Offline batch reliability and no-body work (2026-10-27)
+
+A deadline now preserves the exact failed phase (`read_capability`,
+`read_begin`, `read_candidates`, `read_prepare`, `read_commit`,
+`writer_admission`, `writer_connection`, `writer_setup`, `writer_begin`,
+`writer_validate`, `writer_apply`, `writer_commit`) and read/reservation/wait/
+held/commit milliseconds. SQLite interruption caused by an expired read/write
+context retains both its SQLite code and `deadline_exceeded` classification.
+These diagnostics do not prove a hard physical-I/O limit. Production budgets
+remain unchanged; offline flags remain independently tunable.
+
+The copy CLI's `--prewrite-retries` (default8, zero disables) retries only a
+batch deadline whose commit state is explicitly `not_started`, whose cursor is
+unchanged, and whose parent wall context is still live. Each retry halves only
+the requested row count down to1. Fixed clock, cutoff, identity, byte limits and
+time limits stay identical. Every attempt consumes `--max-batches`; an open,
+rolled-back, committed or unknown transaction is never automatically retried.
+The next confirmed prefix starts with the configured batch size again. Last
+attempt and last failed attempt contain safe phase/timing data; counts include
+only confirmed commits.
+
+The private `history-copy-checkpoint.json` records only the latest confirmed
+stage/cursor, fixed clock/cutoff and source SHA, atomically with file/directory
+fsync. It contains object IDs and is **not** emitted on stdout. It is a
+conservative prefix, not a closed-file hash or permission to reopen an existing
+target. This patch adds no resume-existing, skip-check, adopt-volume or foreign
+reference bypass. Old partial0006 has no trusted saved cursor: scanned211100
+must never be interpreted as an event ID. It remains preserved evidence.
+
+For raw metadata events, one strict JSON decode proves absence of all existing
+body fields and absence of a retention marker. Snapshot preparation then skips
+owner/turn eligibility and transformation because nothing can be cleared or
+marked. The writer still verifies length, owner metadata and exact payload CAS
+before advancing; the row is counted as retained `raw_no_body`, with no content
+change, audit marker, deletion or pretend send. Body-bearing, malformed,
+foreign/unproven-marker and protected data keep their original qualification
+path. No SQL JSON prefilter guesses eligibility or removes rows from coverage.
+Unmarked raw objects also avoid the redundant inline-marker JSON parse; this
+optimization does not change its predicate. Row IDs and all headers remain.
+
+The original sealed historical source can be copied into another newly created
+private volume using the existing executor. A56s server-local copy and39s fold
+were measured for the prior run; the27min quick-check and full census remain
+real costs and are not skipped by this patch. No full copy is made on bender.
+Using a closed partial as a new readonly source requires separate sealing,
+all-reference checks, a new SHA and explicit inheritance of the original fixed
+clock/identity evidence; it is not automatically accepted as resumable here.
+No performance multiplier or complete-cleanup duration is claimed before the
+next historical rehearsal measures it. Full content scans still do not bound
+metadata row counts or establish sustainable daily capacity.
