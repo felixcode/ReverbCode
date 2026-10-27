@@ -233,6 +233,7 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 		return report, errors.New("copy_identity_unknown")
 	}
 	for _, stage := range stages {
+		phase = "maintenance_" + stage
 		if o.Progress != nil {
 			o.Progress("maintenance_"+stage, 0)
 		}

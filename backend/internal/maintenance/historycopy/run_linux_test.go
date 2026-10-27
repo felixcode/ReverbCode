@@ -263,3 +263,11 @@ func TestHistoryCopyPreservesApplicationForeignKeyEnforcement(t *testing.T) {
 	found:=false;for _,stage:=range r.Stages { if stage.Stage=="builtin:telemetry_event" && stage.SQLiteCode!=0 && !stage.Complete { found=true } }
 	if !found { t.Fatal("constraint failure not reported",r) }
 }
+
+func TestHistoryCopyCancellationNeverChangesSealedSource(t *testing.T) {
+	source, sha := fixture(t); before,err:=os.ReadFile(source);if err!=nil{t.Fatal(err)}
+	o:=testOptions(source,sha,filepath.Join(t.TempDir(),"fresh"));o.Clean=true
+	ctx,cancel:=context.WithCancel(context.Background());cancel()
+	r,err:=Run(ctx,o);if err==nil||r.Complete{t.Fatal("canceled run completed",r,err)}
+	after,err:=os.ReadFile(source);if err!=nil||string(before)!=string(after){t.Fatal("source changed on cancellation",err)}
+}

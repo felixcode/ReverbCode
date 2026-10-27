@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/maintenance/historycopy"
@@ -59,7 +61,9 @@ func main() {
 	o.Copy.MaxBatches = o.MaxBatches
 	o.Copy.MaxRowBytes = o.Maintenance.MaxRowBytes
 	o.Copy.BatchBytes = o.Maintenance.BatchBytes
-	report, err := historycopy.Run(context.Background(), o)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	report, err := historycopy.Run(ctx, o)
 	if e := json.NewEncoder(os.Stdout).Encode(report); e != nil {
 		os.Exit(1)
 	}
