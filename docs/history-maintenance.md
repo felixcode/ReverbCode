@@ -126,3 +126,67 @@ The separate [offline history copy cleanup](operations/offline-history-copy.md)
 runner reuses these exact application rules with a historical clock on an
 exclusively new private copy. It adds no daemon route or live cleanup setting,
 and performs no VACUUM or production database replacement.
+
+## Bounded free-page reclamation (2026-10-27)
+
+This source adds a typed private-Unix `POST /v1/history/reclaim` and one-shot
+`ao history-page-reclaim` client. It does not open a network listener, accept
+SQL/paths/tables, start a watcher, change journal/auto-vacuum mode, checkpoint,
+truncate/delete WAL, or run full VACUUM. Installation and hourly-caller wiring
+are separate maintenance steps; this source does not deploy or enable them.
+
+The daemon only reclaims its own identity-bound main database with
+`auto_vacuum=INCREMENTAL` (2). Modes0/1 return unsupported and are never converted;
+low free-page counts return no_work. The caller can only lower MaxPages/time or
+raise the free-page threshold. It uses the existing shared maintenance admission,
+business-priority writer, busy-timeout restoration/discard and COMMIT outcome
+rules. A waiting business writer stops the loop between individual
+`PRAGMA main.incremental_vacuum(1)` steps. All steps share one write deadline;
+rollback/cancellation do not report confirmed pages, and unknown COMMIT remains
+unknown. A step is not a hard physical-I/O limit.
+
+`ALBANIA_AO_HISTORY_RECLAIM_MAX_PAGES` (default16),
+`ALBANIA_AO_HISTORY_RECLAIM_MIN_FREE_PAGES` (default256) and
+`ALBANIA_AO_HISTORY_RECLAIM_TRANSACTION_SECONDS` (default0.25) are tunable.
+Read/write limits never exceed existing history-maintenance limits. Invalid new
+settings disable only reclaim, leaving existing content maintenance available.
+Example configuration for a future reviewed installation:
+
+```sh
+ALBANIA_AO_HISTORY_RECLAIM_MAX_PAGES=16
+ALBANIA_AO_HISTORY_RECLAIM_MIN_FREE_PAGES=256
+ALBANIA_AO_HISTORY_RECLAIM_TRANSACTION_SECONDS=0.25
+```
+
+The writer's connection-local wal_autocheckpoint is temporarily0 and restored;
+restoration failure discards that connection. This does not change business
+configuration. Because last-writer close/discard can implicitly checkpoint, each
+active reclaim temporarily holds a genuinely readonly `file:` URI connection
+to its own verified main file. It reads main.sqlite_schema and fully drains the
+statement, keeping no snapshot. The guard stays open through writer restoration,
+discard and release, then closes itself. Ordinary AO reader pools are RW and do
+not establish this readonly guarantee.
+
+Modernc v1.51.0 actually reports SQLite3.53.1. Synthetic characterization proves
+transaction commit/rollback/cancel, held-reader WAL behavior, per-connection
+wal_autocheckpoint restore, writer close/discard and final true-RO close/reopen.
+The last true-RO close left main length/SHA unchanged and committed WAL readable.
+A plain path plus `?mode=ro` was experimentally writable; use a proper `file:`
+URI. The initial false-RO fixture failure is preserved, not reclassified.
+SQLite3.53.1 is newer than the [WAL-reset fix](https://www.sqlite.org/wal.html#walresetbug)
+in3.51.3; no dependency upgrade is part of this change.
+
+Result fields distinguish attempted steps, confirmed freelist pages removed,
+logical page-count/byte reduction, main/WAL file lengths and allocated blocks.
+Pointer-map removal may make logical pages exceed freed freelist pages. WAL mode
+may leave the main file unchanged until ordinary later checkpoint activity;
+file/block observations are not attributed OS-space savings. Close/restoration
+and unrelated concurrent I/O cannot be promised to fit a hard250ms total limit.
+Only confirmed transaction counts are accumulated. The client prints a concrete
+typed response and rejects unrecognized nested content.
+
+This frees complete unused pages only. Compacting column bodies need not create
+whole free pages, and raw/event/turn/session metadata still grows. Default16steps
+is conservative, not proven sustainable capacity. The hourly caller must later
+reserve a small configurable budget for reclamation and measure body/row/page/
+DB/WAL trends; neither this endpoint nor auto-vacuum bounds all future storage.

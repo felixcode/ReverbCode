@@ -97,6 +97,23 @@ func peerUID(conn net.Conn) (uint32, error) {
 	return uid, inner
 }
 func Start(path string, s *store.Store, o store.HistoryMaintenanceOptions) (*Server, error) {
+	r := store.DefaultPageReclaimOptions()
+	r.ReadBudget = min(r.ReadBudget, o.ReadBudget)
+	r.WriteBudget = min(r.WriteBudget, o.WriteBudget)
+	return StartWithPageReclaim(path, s, o, &r)
+}
+
+func StartWithPageReclaim(path string, s *store.Store, o store.HistoryMaintenanceOptions, reclaim *store.PageReclaimOptions) (*Server, error) {
+	if reclaim != nil {
+		copy := *reclaim
+		copy.ReadBudget = min(copy.ReadBudget, o.ReadBudget)
+		copy.WriteBudget = min(copy.WriteBudget, o.WriteBudget)
+		if copy.Validate() != nil {
+			reclaim = nil
+		} else {
+			reclaim = &copy
+		}
+	}
 	if err := privateParent(path); err != nil {
 		return nil, err
 	}
@@ -148,6 +165,15 @@ func Start(path string, s *store.Store, o store.HistoryMaintenanceOptions) (*Ser
 		cap["pid"] = os.Getpid()
 		cap["retentionHours"] = o.Retention.Hours()
 		cap["writeBudgetMS"] = o.WriteBudget.Milliseconds()
+		if reclaim == nil {
+			cap["pageReclaim"] = map[string]any{"configured": false, "supported": false, "reason": "invalid_reclaim_configuration"}
+		} else {
+			reclaimCap := s.PageReclaimCapability(ctx)
+			reclaimCap["maxPages"] = reclaim.MaxPages
+			reclaimCap["minFreePages"] = reclaim.MinFreePages
+			reclaimCap["writeBudgetMS"] = reclaim.WriteBudget.Milliseconds()
+			cap["pageReclaim"] = reclaimCap
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(cap)
 	})
@@ -175,6 +201,31 @@ func Start(path string, s *store.Store, o store.HistoryMaintenanceOptions) (*Ser
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(result)
 			return
+		}
+		json.NewEncoder(w).Encode(result)
+	})
+	mux.HandleFunc("POST /v1/history/reclaim", func(w http.ResponseWriter, r *http.Request) {
+		if !allowed(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if reclaim == nil {
+			json.NewEncoder(w).Encode(store.PageReclaimResult{Status: "unsupported", Reason: "invalid_reclaim_configuration", CommitState: "not_started"})
+			return
+		}
+		defer r.Body.Close()
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
+		decoder.DisallowUnknownFields()
+		var request store.PageReclaimRequest
+		if decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF {
+			http.Error(w, "invalid typed reclaim request", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), reclaim.ReadBudget+reclaim.WriteBudget)
+		defer cancel()
+		result, err := s.ReclaimPages(ctx, request, *reclaim)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		json.NewEncoder(w).Encode(result)
 	})
@@ -223,5 +274,9 @@ func StartConfigured(s *store.Store) (*Server, error) {
 		}
 		o.BatchRows = n
 	}
-	return Start(path, s, o)
+	reclaim, reclaimErr := configuredPageReclaimOptions(o)
+	if reclaimErr != nil {
+		return StartWithPageReclaim(path, s, o, nil)
+	}
+	return StartWithPageReclaim(path, s, o, &reclaim)
 }
