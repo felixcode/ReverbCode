@@ -192,6 +192,9 @@ func (c *reclaimInterceptConn) Begin() (driver.Tx, error) {
 	return &reclaimInterceptTx{Tx: tx, unknown: c.owner.commitUnknown}, nil
 }
 func (c *reclaimInterceptConn) BeginTx(ctx context.Context, o driver.TxOptions) (driver.Tx, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var tx driver.Tx
 	var err error
 	if b, ok := c.Conn.(driver.ConnBeginTx); ok {

@@ -243,6 +243,9 @@ func (s *Store) ReclaimPages(ctx context.Context, req PageReclaimRequest, o Page
 				result.Reason = "business_writer_waiting"
 				return nil
 			}
+			if e := writeCtx.Err(); e != nil {
+				return e
+			}
 			tx, e := connection.BeginTx(writeCtx, nil)
 			if e != nil {
 				return e
