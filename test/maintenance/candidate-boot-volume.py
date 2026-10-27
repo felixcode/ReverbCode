@@ -81,12 +81,13 @@ def candidate(receipt, managed=None):
             raise ValueError("cleanup_unknown_identity_unproved")
         deferred = managed.deferred_sequence(first) if unknowns else []
         resolved = receipt.get("resolved_identity_checks")
-        if receipt.get("deferred_identity_checks") != deferred or not isinstance(resolved, list) or len(resolved) != len(deferred):
+        if (receipt.get("deferred_identity_checks") != deferred or any(not isinstance(v, dict) or type(v.get("rows")) is not int for v in receipt.get("deferred_identity_checks", []))
+                or not isinstance(resolved, list) or len(resolved) != len(deferred)):
             raise ValueError("cleanup_deferred_identity_unproved")
         for pending, proof in zip(deferred, resolved):
             tables = second["tool_report"].get("tables")
             rows = [v for v in tables if isinstance(v, dict) and v.get("name") == "sqlite_sequence"] if isinstance(tables, list) else []
-            if (len(rows) != 1 or type(rows[0].get("rows")) is not int or rows[0]["rows"] != pending["rows"]
+            if (not isinstance(proof, dict) or type(proof.get("rows")) is not int or len(rows) != 1 or type(rows[0].get("rows")) is not int or rows[0]["rows"] != pending["rows"]
                     or rows[0].get("without_rowid") is not False or not sha256_value(rows[0].get("rowid_sha256"))
                     or proof != pending | {"status": "verified_by_rebuild_typed_values_rowid_and_sequence", "rebuild_big_endian_rowid_sha256": rows[0]["rowid_sha256"]}):
                 raise ValueError("cleanup_resolved_identity_unproved")

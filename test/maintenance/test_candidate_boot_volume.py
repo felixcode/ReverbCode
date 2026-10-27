@@ -240,7 +240,7 @@ class CandidateContracts(unittest.TestCase):
         value["resolved_identity_checks"] = [pending | {"status": "verified_by_rebuild_typed_values_rowid_and_sequence", "rebuild_big_endian_rowid_sha256": "e"*64}]
         value["second"]["tool_report"]["tables"] = [dict(name="sqlite_sequence", rows=1, without_rowid=False, rowid_sha256="e"*64)]
         self.assertEqual(boot.candidate(value, managed), boot.candidate(value["second"]))
-        for kind in ("wrong_hash", "wrong_rows", "bool_rows", "missing_table", "missing_resolution"):
+        for kind in ("wrong_hash", "wrong_rows", "bool_rows", "missing_table", "missing_resolution", "bool_pending_rows", "bool_resolved_rows"):
             bad = copy.deepcopy(value)
             if kind == "wrong_hash":
                 bad["resolved_identity_checks"][0]["rebuild_big_endian_rowid_sha256"] = "d"*64
@@ -248,6 +248,10 @@ class CandidateContracts(unittest.TestCase):
                 bad["second"]["tool_report"]["tables"][0]["rows"] = 2 if kind == "wrong_rows" else True
             elif kind == "missing_table":
                 bad["second"]["tool_report"]["tables"] = []
+            elif kind == "bool_pending_rows":
+                bad["deferred_identity_checks"][0]["rows"] = True
+            elif kind == "bool_resolved_rows":
+                bad["resolved_identity_checks"][0]["rows"] = True
             else:
                 bad["resolved_identity_checks"] = []
             with self.subTest(kind=kind), self.assertRaises(ValueError):
