@@ -139,6 +139,10 @@ func TestPageReclaimCharacterizationWALHeldReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Rollback()
+	var visible int
+	if err = reader.QueryRow(`SELECT COUNT(*) FROM payloads`).Scan(&visible); err != nil || visible != 1 {
+		t.Fatal("reader snapshot not established", visible, err)
+	}
 	old := reclaimState(t, reader)
 	mainBefore, err := os.Stat(path)
 	if err != nil {
@@ -171,7 +175,7 @@ func TestPageReclaimCharacterizationWALHeldReader(t *testing.T) {
 
 func TestPageReclaimCharacterizationAutocheckpointConnectionLocal(t *testing.T) {
 	w, _, path := reclaimFixture(t)
-	if _, err := w.Exec(`PRAGMA wal_autocheckpoint=7`); err != nil {
+	if _, err := w.Exec(`PRAGMA wal_autocheckpoint=1`); err != nil {
 		t.Fatal(err)
 	}
 	second, err := sql.Open("sqlite", path+"?_pragma=wal_autocheckpoint(19)")
@@ -186,7 +190,7 @@ func TestPageReclaimCharacterizationAutocheckpointConnectionLocal(t *testing.T) 
 	if err = second.QueryRow(`PRAGMA wal_autocheckpoint`).Scan(&other); err != nil {
 		t.Fatal(err)
 	}
-	if own != 7 || other != 19 {
+	if own != 1 || other != 19 {
 		t.Fatal("autocheckpoint setting escaped its connection", own, other)
 	}
 	before, err := os.Stat(path)
@@ -204,7 +208,7 @@ func TestPageReclaimCharacterizationAutocheckpointConnectionLocal(t *testing.T) 
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = w.Exec(`PRAGMA wal_autocheckpoint=7`); err != nil {
+	if _, err = w.Exec(`PRAGMA wal_autocheckpoint=1`); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(path)
