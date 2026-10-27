@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 )
 
@@ -100,7 +101,8 @@ func (s *Store) PageReclaimCapability(ctx context.Context) map[string]any {
 
 // ReclaimPages only mutates main through the same AO writer/admission used by
 // content maintenance. A step is not a hard physical-I/O bound. Connection close
-// can perform SQLite implicit I/O; see the unvalidated characterization contract.
+// can perform SQLite implicit I/O. A temporary true-readonly connection with no
+// active snapshot covers writer release/discard; its own close is characterized.
 func (s *Store) ReclaimPages(ctx context.Context, req PageReclaimRequest, o PageReclaimOptions) (result PageReclaimResult, err error) {
 	result = PageReclaimResult{Status: "deferred", CommitState: "not_started"}
 	defer func() {
@@ -150,6 +152,20 @@ func (s *Store) ReclaimPages(ctx context.Context, req PageReclaimRequest, o Page
 	defer s.maintenanceBusy.Store(false)
 	readCtx, cancelRead := context.WithTimeout(ctx, o.ReadBudget)
 	var path string
+	var releaseReadonly func() error
+	defer func() {
+		if releaseReadonly != nil {
+			at := time.Now()
+			e := releaseReadonly()
+			result.ConnectionReleaseMS += maintenanceMillis(at)
+			if err == nil && e != nil {
+				err = errors.New("reclaim readonly release failed")
+			}
+		}
+		if result.FilesBefore.Known {
+			result.FilesAfter = observeReclaimFiles(path, req.DatabaseDevice, req.DatabaseInode)
+		}
+	}()
 	func() {
 		defer cancelRead()
 		cap := s.MaintenanceCapability(readCtx)
@@ -177,8 +193,14 @@ func (s *Store) ReclaimPages(ctx context.Context, req PageReclaimRequest, o Page
 		}
 		result.Before = &before
 		err = s.readDB.QueryRowContext(readCtx, `SELECT sqlite_version()`).Scan(&result.SQLiteVersion)
+		if err == nil && before.AutoVacuum == 2 && before.FreelistPages >= o.MinFreePages {
+			releaseReadonly, err = pinReclaimReadonly(readCtx, path, req.DatabaseDevice, req.DatabaseInode)
+		}
 	}()
 	if err != nil {
+		if errors.Is(readCtx.Err(), context.DeadlineExceeded) {
+			err = errors.Join(err, readCtx.Err())
+		}
 		return result, err
 	}
 	if result.Before.AutoVacuum != 2 {
@@ -208,9 +230,11 @@ func (s *Store) ReclaimPages(ctx context.Context, req PageReclaimRequest, o Page
 	defer func() {
 		at := time.Now()
 		_ = connection.Close()
-		result.ConnectionReleaseMS = maintenanceMillis(at)
-		result.FilesAfter = observeReclaimFiles(path, req.DatabaseDevice, req.DatabaseInode)
+		result.ConnectionReleaseMS += maintenanceMillis(at)
 	}()
+	if !result.FilesBefore.Known {
+		return result, errors.New("reclaim main identity changed before writer")
+	}
 	base := HistoryMaintenanceResult{Retained: map[string]int{}}
 	autoDiscarded := false
 	err = withMaintenanceConnection(writeCtx, connection, &base, func() error {
@@ -307,6 +331,9 @@ func (s *Store) ReclaimPages(ctx context.Context, req PageReclaimRequest, o Page
 			return nil
 		})
 	})
+	if err != nil && errors.Is(writeCtx.Err(), context.DeadlineExceeded) {
+		err = errors.Join(err, writeCtx.Err())
+	}
 	result.ConnectionRestoreFailed = base.ConnectionRestoreFailed || result.AutoCheckpointRestoreFailed
 	result.ConnectionDiscarded = base.ConnectionDiscarded || autoDiscarded
 	return result, err
@@ -333,4 +360,36 @@ func withReclaimAutoCheckpoint(ctx context.Context, c *sql.Conn, restoreFailed, 
 		return err
 	}
 	return run()
+}
+
+// Ordinary AO reader pools are RW handles. They cannot provide this guarantee.
+// This private connection uses a file: URI mode=ro, reads own-main sqlite_schema
+// to open its pager/WAL, drains the statement and holds no read transaction.
+func pinReclaimReadonly(ctx context.Context, path string, device, inode uint64) (func() error, error) {
+	if !observeReclaimFiles(path, device, inode).Known {
+		return nil, errors.New("reclaim main identity unavailable")
+	}
+	u := url.URL{Scheme: "file", Path: path}
+	pool, err := sql.Open("sqlite", u.String()+"?mode=ro&_pragma=busy_timeout(0)")
+	if err != nil {
+		return nil, err
+	}
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	conn, err := pool.Conn(ctx)
+	if err != nil {
+		_ = pool.Close()
+		return nil, err
+	}
+	release := func() error { return errors.Join(conn.Close(), pool.Close()) }
+	var count int64
+	if err = conn.QueryRowContext(ctx, `SELECT count(*) FROM main.sqlite_schema`).Scan(&count); err != nil {
+		_ = release()
+		return nil, err
+	}
+	if !observeReclaimFiles(path, device, inode).Known {
+		_ = release()
+		return nil, errors.New("reclaim main identity changed")
+	}
+	return release, nil
 }

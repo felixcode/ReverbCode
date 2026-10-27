@@ -47,15 +47,11 @@ func newHistoryPageReclaimCommand() *cobra.Command {
 		if err != nil || len(data) > 65536 || !json.Valid(data) {
 			return fmt.Errorf("invalid private reclaim response")
 		}
-		var raw map[string]json.RawMessage
-		if err = json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("invalid private reclaim result")
-		}
-		safe := map[string]json.RawMessage{}
-		for _, key := range []string{"status", "reason", "commit_state", "transaction_committed", "attempted_steps", "freelist_pages_removed", "logical_pages_removed", "logical_page_bytes_removed", "before", "after", "files_before", "files_after", "sqlite_version", "connection_restore_failed", "connection_discarded", "autocheckpoint_restore_failed", "writer_reserved_ms", "held_ms", "commit_ms", "connection_release_ms", "error_type", "sqlite_code"} {
-			if v, ok := raw[key]; ok {
-				safe[key] = v
-			}
+		var safe historyPageReclaimResponse
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err = decoder.Decode(&safe); err != nil {
+			return fmt.Errorf("invalid typed private reclaim result")
 		}
 		if err = writeJSON(cmd.OutOrStdout(), safe); err != nil {
 			return err
@@ -73,4 +69,43 @@ func newHistoryPageReclaimCommand() *cobra.Command {
 	cmd.Flags().DurationVar(&writeBudget, "write-budget", 0, "lower daemon write budget; zero uses configured value")
 	cmd.Flags().DurationVar(&timeout, "timeout", 3*time.Second, "one-shot request timeout")
 	return cmd
+}
+
+type historyPageReclaimStats struct {
+	AutoVacuum    int64 `json:"auto_vacuum"`
+	PageSize      int64 `json:"page_size"`
+	PageCount     int64 `json:"page_count"`
+	FreelistPages int64 `json:"freelist_pages"`
+}
+type historyPageReclaimFiles struct {
+	Known              bool  `json:"known"`
+	MainBytes          int64 `json:"main_bytes"`
+	WALBytes           int64 `json:"wal_bytes"`
+	MainAllocatedBytes int64 `json:"main_allocated_bytes"`
+	WALAllocatedBytes  int64 `json:"wal_allocated_bytes"`
+	WALPresent         bool  `json:"wal_present"`
+}
+type historyPageReclaimResponse struct {
+	Status                      string                   `json:"status"`
+	Reason                      string                   `json:"reason,omitempty"`
+	CommitState                 string                   `json:"commit_state"`
+	Committed                   bool                     `json:"transaction_committed"`
+	AttemptedSteps              int64                    `json:"attempted_steps"`
+	FreelistPagesRemoved        int64                    `json:"freelist_pages_removed"`
+	LogicalPagesRemoved         int64                    `json:"logical_pages_removed"`
+	LogicalPageBytesRemoved     int64                    `json:"logical_page_bytes_removed"`
+	Before                      *historyPageReclaimStats `json:"before,omitempty"`
+	After                       *historyPageReclaimStats `json:"after,omitempty"`
+	FilesBefore                 historyPageReclaimFiles  `json:"files_before"`
+	FilesAfter                  historyPageReclaimFiles  `json:"files_after"`
+	SQLiteVersion               string                   `json:"sqlite_version,omitempty"`
+	ConnectionRestoreFailed     bool                     `json:"connection_restore_failed"`
+	ConnectionDiscarded         bool                     `json:"connection_discarded"`
+	AutoCheckpointRestoreFailed bool                     `json:"autocheckpoint_restore_failed"`
+	WriterReservedMS            float64                  `json:"writer_reserved_ms"`
+	HeldMS                      float64                  `json:"held_ms"`
+	CommitMS                    float64                  `json:"commit_ms"`
+	ConnectionReleaseMS         float64                  `json:"connection_release_ms"`
+	ErrorType                   string                   `json:"error_type,omitempty"`
+	SQLiteCode                  int                      `json:"sqlite_code,omitempty"`
 }

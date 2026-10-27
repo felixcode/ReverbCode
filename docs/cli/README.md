@@ -345,3 +345,8 @@ project settings.
 ## Private history maintenance
 
 `ao history-maintenance` sends one typed request over the operator-configured, same-UID Unix socket. It never opens SQLite or uses a network-facing maintenance route. Output contains counts/status/timings and a cursor digest only. See [coordination and deployment contract](../history-maintenance.md).
+
+Private storage maintenance also has a one-shot `history-page-reclaim` command.
+It talks only to the configured private Unix socket with expected database
+device/inode and tightening page/time limits; it never opens SQLite. See
+[bounded page reclamation](../history-maintenance.md#bounded-free-page-reclamation-2026-10-27).

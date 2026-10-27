@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -46,10 +47,11 @@ func requireReclaimReadonly(t *testing.T, c *sql.Conn) {
 	}
 }
 
-func reclaimFixture(t *testing.T) (*sql.DB, *sql.DB, string) {
+func reclaimFixture(t *testing.T) (*sql.DB, *sql.DB, string) { return reclaimFixtureMode(t, 2) }
+func reclaimFixtureMode(t *testing.T, mode int) (*sql.DB, *sql.DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ao.db")
-	w, err := sql.Open("sqlite", path+"?_pragma=auto_vacuum(2)&_pragma=busy_timeout(0)&_txlock=immediate")
+	w, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=auto_vacuum(%d)&_pragma=busy_timeout(0)&_txlock=immediate", path, mode))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +89,7 @@ func reclaimFixture(t *testing.T) (*sql.DB, *sql.DB, string) {
 	}
 	r.SetMaxOpenConns(1)
 	t.Cleanup(func() { r.Close(); w.Close() })
-	if s := reclaimState(t, w); s.Free < 16 {
+	if s := reclaimState(t, w); mode != 1 && s.Free < 16 {
 		t.Fatal("insufficient planted free pages", s)
 	}
 	return w, r, path
