@@ -210,7 +210,22 @@ func TestReviewRunningIndexSmallSampleDiagnostics(t *testing.T) {
 			if _, err = db.Exec(`UPDATE review_run SET status='complete' WHERE status='running'`); err != nil {
 				t.Fatal(err)
 			}
-			t.Logf("mode=%s fixture_rows=12000 initial_running=32 added_index_bytes=%d build_ns=%d insert_terminal_1000_ns=%d settle_running_32_ns=%d", mode, bytes, buildNS, terminalWriteNS, time.Since(write).Nanoseconds())
+			settleNS := time.Since(write).Nanoseconds()
+			write = time.Now()
+			tx, err = db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 1000; i++ {
+				if err = insertIndexReview(tx, fmt.Sprintf("running-new-%d", i), "insert-owner", "", "", "running"); err != nil {
+					tx.Rollback()
+					t.Fatal(err)
+				}
+			}
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("mode=%s fixture_rows=12000 initial_running=32 added_index_bytes=%d build_ns=%d insert_terminal_1000_ns=%d settle_running_32_ns=%d insert_running_1000_ns=%d", mode, bytes, buildNS, terminalWriteNS, settleNS, time.Since(write).Nanoseconds())
 		})
 	}
 }
