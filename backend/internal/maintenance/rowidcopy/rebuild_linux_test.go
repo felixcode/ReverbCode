@@ -280,3 +280,25 @@ func TestRowIDRebuildUTF16EncodingAndQuotedNames(t *testing.T) {
 		t.Fatal(encoding, e)
 	}
 }
+
+func TestTypedVerificationDetectsValuesBeyondNULAndStorageClass(t *testing.T) {
+	for _,mutation := range []string{
+		`UPDATE main.t SET v=CAST(x'610063' AS TEXT)`,
+		`UPDATE main.t SET v=x'610062'`,
+		`UPDATE main.t SET n=1.0`,
+		`UPDATE main.t SET rowid=99`,
+	} {
+		p := snapshot(t, `CREATE TABLE t(id TEXT PRIMARY KEY,v,n);INSERT INTO t(rowid,id,v,n) VALUES(17,'id',CAST(x'610062' AS TEXT),1);`)
+		db, err := sql.Open("sqlite", ":memory:")
+		if err != nil {t.Fatal(err)}
+		c, err := db.Conn(context.Background())
+		if err != nil {t.Fatal(err)}
+		if _,err=c.ExecContext(context.Background(),`ATTACH DATABASE ? AS sealed`,p);err!=nil{t.Fatal(err)}
+		if _,err=c.ExecContext(context.Background(),`CREATE TABLE main.t(id TEXT PRIMARY KEY,v,n);INSERT INTO main.t(rowid,id,v,n) SELECT rowid,id,v,n FROM sealed.t;`);err!=nil{t.Fatal(err)}
+		table:=table{name:"t",rowid:"rowid",columns:[]string{"id","v","n"}}
+		if err=verifyValues(context.Background(),c,table);err!=nil{t.Fatal("equal fixture rejected",err)}
+		if _,err=c.ExecContext(context.Background(),mutation);err!=nil{t.Fatal(err)}
+		if err=verifyValues(context.Background(),c,table);err==nil{t.Fatal("typed/ROWID corruption accepted")}
+		c.Close();db.Close()
+	}
+}
