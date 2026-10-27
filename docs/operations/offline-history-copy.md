@@ -172,3 +172,24 @@ clock/identity evidence; it is not automatically accepted as resumable here.
 No performance multiplier or complete-cleanup duration is claimed before the
 next historical rehearsal measures it. Full content scans still do not bound
 metadata row counts or establish sustainable daily capacity.
+
+## Snapshot transaction-local qualification facts (2026-10-27)
+
+Readonly fixed-template profiling of five 32-row windows in the sealed historical
+source found repeated review-running scans and conversation queued/running-turn
+lookups dominating body-bearing preparation. The snapshot raw stage now remembers
+only these two boolean results by owner/conversation within one transaction.
+The reader cache is discarded before writer admission; the writer creates an
+independent cache and rechecks current facts. Raw-stage application writes affect
+only provider events and retention audits, not review/turn lifecycle. Neither
+errors, raw content, row metadata, audit markers nor CAS results are cached.
+Other stages and the live daemon retain their existing query path. No index,
+schema, eligibility rule, lock budget or command-line setting changes.
+
+The opt-in readonly diagnostic compares every prepared field/audit/proof using a
+complete plan SHA256 for identical input IDs and a fixed clock. All five window
+digests matched; three body-bearing windows reduced review calls from 25/26/24
+to 2/3/4 and conversation-live calls from 5/26/24 to 1/3/4. Sequential diagnostic
+prepare times were 109.9→31.2ms, 90.2→28.6ms and 136.0→34.6ms. These small ordered
+samples are query-reuse evidence, not a full-copy throughput or completion-time
+promise. They neither reuse an active job's database nor change its binary.

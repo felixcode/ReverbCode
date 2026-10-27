@@ -204,7 +204,7 @@ func maintenanceClosedOwner(ctx context.Context, db maintenanceDB, id string) (b
 		if e != nil || handoff {
 			return false, e
 		}
-		reviewing, e := maintenanceExists(ctx, db, `SELECT 1 FROM review_run WHERE session_id=? AND status='running' LIMIT 1`, owner)
+		reviewing, e := maintenanceReviewActive(ctx, db, owner)
 		if e != nil || reviewing {
 			return false, e
 		}
@@ -218,7 +218,7 @@ func maintenanceClosedOwner(ctx context.Context, db maintenanceDB, id string) (b
 			return false, nil
 		}
 	}
-	active, err := maintenanceExists(ctx, db, `SELECT 1 FROM conversation_turns WHERE conversation_id=? AND state IN ('queued','running') LIMIT 1`, id)
+	active, err := maintenanceConversationLive(ctx, db, id)
 	if err != nil || active {
 		return false, err
 	}
@@ -309,7 +309,7 @@ func maintenanceEligibleWithProof(ctx context.Context, db maintenanceDB, row mai
 			if err != nil {
 				return false, err
 			}
-			reviewing, e := maintenanceExists(ctx, db, `SELECT 1 FROM review_run WHERE session_id=? AND status='running' LIMIT 1`, row.text("session_id"))
+			reviewing, e := maintenanceReviewActive(ctx, db, row.text("session_id"))
 			if e != nil {
 				return false, e
 			}
