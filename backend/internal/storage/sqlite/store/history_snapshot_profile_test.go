@@ -224,78 +224,91 @@ func TestSnapshotPrepareProfileReadonly(t *testing.T) {
 		if err != nil {
 			t.Fatal("profile_ids")
 		}
-		p.mu.Lock()
-		p.metrics = map[string]snapshotSQLMetric{}
-		p.queries = map[string]string{}
-		p.args = map[string][]driver.NamedValue{}
-		p.mu.Unlock()
-		tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-		if err != nil {
-			t.Fatal("profile_begin")
-		}
-		start := time.Now()
-		plans, err := prepareMaintenanceRows(ctx, tx, maintenanceStages["raw"], "raw", "id", ids, DefaultHistoryMaintenanceOptions(), asOf, asOf.Add(-47*time.Hour), true)
-		elapsed := time.Since(start)
-		tx.Rollback()
-		if err != nil {
-			t.Fatal("profile_prepare_failed")
-		}
-		retained := map[string]int{}
-		body := 0
-		for _, plan := range plans {
-			if plan.skip != "" {
-				retained[plan.skip]++
+		baselineSHA := ""
+		for _, mode := range []string{"baseline", "cached"} {
+			p.mu.Lock()
+			p.metrics = map[string]snapshotSQLMetric{}
+			p.queries = map[string]string{}
+			p.args = map[string][]driver.NamedValue{}
+			p.mu.Unlock()
+			tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+			if err != nil {
+				t.Fatal("profile_begin")
 			}
-			if plan.proof != nil && plan.proof.hasBody {
-				body++
+			eligibility := maintenanceDB(tx)
+			if mode == "cached" {
+				eligibility = maintenanceSnapshotEligibility(tx, "raw", true)
 			}
-		}
-		type metric struct {
-			Name        string `json:"template"`
-			Calls       int64  `json:"calls"`
-			Nanoseconds int64  `json:"nanoseconds"`
-			PlanSHA     string `json:"explain_sha256"`
-			Scan        int    `json:"scans"`
-			Search      int    `json:"searches"`
-		}
-		values := []metric{}
-		p.mu.Lock()
-		saved := map[string]snapshotSQLMetric{}
-		for n, m := range p.metrics {
-			saved[n] = m
-		}
-		queries := p.queries
-		arguments := p.args
-		p.mu.Unlock()
-		for name, m := range saved {
-			args := []any{}
-			for _, a := range arguments[name] {
-				args = append(args, a.Value)
+			start := time.Now()
+			plans, err := prepareMaintenanceRows(ctx, eligibility, maintenanceStages["raw"], "raw", "id", ids, DefaultHistoryMaintenanceOptions(), asOf, asOf.Add(-47*time.Hour), true)
+			elapsed := time.Since(start)
+			tx.Rollback()
+			if err != nil {
+				t.Fatal("profile_prepare_failed")
 			}
-			explain, e := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+queries[name], args...)
-			if e != nil {
-				t.Fatal("profile_explain")
+			planSHA := snapshotPlanSHA(plans)
+			if mode == "baseline" {
+				baselineSHA = planSHA
+			} else if planSHA != baselineSHA {
+				t.Fatal("profile_plan_changed")
 			}
-			details := []string{}
-			scans, search := 0, 0
-			for explain.Next() {
-				var a, b, c int
-				var detail string
-				if e = explain.Scan(&a, &b, &c, &detail); e != nil {
-					t.Fatal("profile_plan")
+			retained := map[string]int{}
+			body := 0
+			for _, plan := range plans {
+				if plan.skip != "" {
+					retained[plan.skip]++
 				}
-				details = append(details, detail)
-				scans += snapshotBoolCount(strings.HasPrefix(detail, "SCAN "))
-				search += snapshotBoolCount(strings.HasPrefix(detail, "SEARCH "))
+				if plan.proof != nil && plan.proof.hasBody {
+					body++
+				}
 			}
-			explain.Close()
-			encoded, _ := json.Marshal(details)
-			sum := sha256.Sum256(encoded)
-			values = append(values, metric{name, m.Calls, m.Nanoseconds, hex.EncodeToString(sum[:]), scans, search})
+			type metric struct {
+				Name        string `json:"template"`
+				Calls       int64  `json:"calls"`
+				Nanoseconds int64  `json:"nanoseconds"`
+				PlanSHA     string `json:"explain_sha256"`
+				Scan        int    `json:"scans"`
+				Search      int    `json:"searches"`
+			}
+			values := []metric{}
+			p.mu.Lock()
+			saved := map[string]snapshotSQLMetric{}
+			for n, m := range p.metrics {
+				saved[n] = m
+			}
+			queries := p.queries
+			arguments := p.args
+			p.mu.Unlock()
+			for name, m := range saved {
+				args := []any{}
+				for _, a := range arguments[name] {
+					args = append(args, a.Value)
+				}
+				explain, e := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+queries[name], args...)
+				if e != nil {
+					t.Fatal("profile_explain")
+				}
+				details := []string{}
+				scans, search := 0, 0
+				for explain.Next() {
+					var a, b, c int
+					var detail string
+					if e = explain.Scan(&a, &b, &c, &detail); e != nil {
+						t.Fatal("profile_plan")
+					}
+					details = append(details, detail)
+					scans += snapshotBoolCount(strings.HasPrefix(detail, "SCAN "))
+					search += snapshotBoolCount(strings.HasPrefix(detail, "SEARCH "))
+				}
+				explain.Close()
+				encoded, _ := json.Marshal(details)
+				sum := sha256.Sum256(encoded)
+				values = append(values, metric{name, m.Calls, m.Nanoseconds, hex.EncodeToString(sum[:]), scans, search})
+			}
+			sort.Slice(values, func(i, j int) bool { return values[i].Nanoseconds > values[j].Nanoseconds })
+			out, _ := json.Marshal(map[string]any{"window": window.name, "mode": mode, "input_rows": len(ids), "prepared_rows": len(plans), "body_rows": body, "retained": retained, "prepare_nanoseconds": int64(elapsed), "plan_sha256": planSHA, "queries": values})
+			t.Log(string(out))
 		}
-		sort.Slice(values, func(i, j int) bool { return values[i].Nanoseconds > values[j].Nanoseconds })
-		out, _ := json.Marshal(map[string]any{"window": window.name, "input_rows": len(ids), "prepared_rows": len(plans), "body_rows": body, "retained": retained, "prepare_nanoseconds": int64(elapsed), "plan_sha256": snapshotPlanSHA(plans), "queries": values})
-		t.Log(string(out))
 	}
 	after, err := os.Stat(path)
 	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || before.ModTime() != after.ModTime() {

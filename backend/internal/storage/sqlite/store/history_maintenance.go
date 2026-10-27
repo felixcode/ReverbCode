@@ -301,7 +301,8 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			return
 		}
 		result.Phase = "read_prepare"
-		plans, err = prepareMaintenanceRows(readCtx, readTx, stage, req.Stage, key, ids, o, now, cutoff, rawNoBodyFastPath...)
+		readEligibility := maintenanceSnapshotEligibility(readTx, req.Stage, rawNoBodyFastPath...)
+		plans, err = prepareMaintenanceRows(readCtx, readEligibility, stage, req.Stage, key, ids, o, now, cutoff, rawNoBodyFastPath...)
 		if err == nil {
 			result.Phase = "read_commit"
 			err = readTx.Commit()
@@ -362,6 +363,9 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			return e
 		}
 		result.Phase = "writer_apply"
+		// A fresh cache belongs only to this writer transaction. Reader facts are
+		// discarded before admission; raw writes cannot change these two facts.
+		writeEligibility := maintenanceSnapshotEligibility(tx, req.Stage, rawNoBodyFastPath...)
 		for _, plan := range plans {
 			if writeCtx.Err() != nil {
 				break
@@ -369,7 +373,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			if s.writeMu.BusinessWaiting() {
 				break
 			}
-			advanced, e := applyMaintenancePrepared(writeCtx, tx, stage, req.Stage, key, plan, cutoff, now, &result)
+			advanced, e := applyMaintenancePreparedWithEligibility(writeCtx, tx, writeEligibility, stage, req.Stage, key, plan, cutoff, now, &result)
 			if e != nil {
 				return e
 			}

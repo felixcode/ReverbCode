@@ -294,6 +294,10 @@ func maintenanceMetadataEqual(original, current maintenanceRow, bodyColumns []st
 // advanced=false retains the changed object at this prefix for another reader
 // preparation. It is never recorded as cleared or given a stale marker.
 func applyMaintenancePrepared(ctx context.Context, tx *sql.Tx, stage maintenanceStage, stageName, key string, p maintenancePrepared, cutoff, now time.Time, result *HistoryMaintenanceResult) (advanced bool, err error) {
+	return applyMaintenancePreparedWithEligibility(ctx, tx, tx, stage, stageName, key, p, cutoff, now, result)
+}
+
+func applyMaintenancePreparedWithEligibility(ctx context.Context, tx *sql.Tx, eligibility maintenanceDB, stage maintenanceStage, stageName, key string, p maintenancePrepared, cutoff, now time.Time, result *HistoryMaintenanceResult) (advanced bool, err error) {
 	if p.skip != "" {
 		if p.skip == "already_expired" {
 			marked, e := maintenanceExists(ctx, tx, `SELECT 1 FROM ao_history_retention WHERE object_kind=? AND object_id=?`, stage.kind, maintenanceID(p.id))
@@ -358,7 +362,7 @@ func applyMaintenancePrepared(ctx context.Context, tx *sql.Tx, stage maintenance
 			result.Retained["raw_no_body"]++
 			return true, nil
 		}
-		eligible, e := maintenanceEligibleWithProof(ctx, tx, current, stageName, cutoff, p.proof)
+		eligible, e := maintenanceEligibleWithProof(ctx, eligibility, current, stageName, cutoff, p.proof)
 		if e != nil {
 			var reason maintenanceRetained
 			if errors.As(e, &reason) {
