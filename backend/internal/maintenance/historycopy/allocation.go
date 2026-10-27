@@ -9,13 +9,13 @@ import (
 )
 
 type ObjectAllocation struct {
-	Name string `json:"name"`
-	Table string `json:"table"`
-	Type string `json:"type"`
-	Pages int64 `json:"pages"`
-	AllocatedBytes int64 `json:"allocated_bytes"`
-	PayloadBytes int64 `json:"payload_bytes"`
-	UnusedBytes int64 `json:"unused_bytes"`
+	Name           string `json:"name"`
+	Table          string `json:"table"`
+	Type           string `json:"type"`
+	Pages          int64  `json:"pages"`
+	AllocatedBytes int64  `json:"allocated_bytes"`
+	PayloadBytes   int64  `json:"payload_bytes"`
+	UnusedBytes    int64  `json:"unused_bytes"`
 }
 type AllocationReport struct {
 	Available     bool               `json:"available"`

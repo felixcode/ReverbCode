@@ -30,26 +30,26 @@ type Options struct {
 	Progress    func(string, int64)
 }
 type StageReport struct {
-	Stage string `json:"stage"`
-	Complete bool `json:"complete"`
-	Batches int64 `json:"batches"`
-	ConfirmedBatches int64 `json:"confirmed_batches"`
-	Scanned int64 `json:"scanned"`
-	Compacted int64 `json:"compacted"`
-	Deleted int64 `json:"deleted"`
-	Audited int64 `json:"audited"`
-	Markers int64 `json:"markers"`
-	NetBodyColumnBytesRemoved int64 `json:"net_body_column_bytes_removed"`
-	Retained map[string]int64 `json:"retained"`
-	CommitState string `json:"last_commit_state"`
-	StopReason string `json:"stop_reason,omitempty"`
-	SQLiteCode int `json:"last_sqlite_code,omitempty"`
+	Stage                     string           `json:"stage"`
+	Complete                  bool             `json:"complete"`
+	Batches                   int64            `json:"batches"`
+	ConfirmedBatches          int64            `json:"confirmed_batches"`
+	Scanned                   int64            `json:"scanned"`
+	Compacted                 int64            `json:"compacted"`
+	Deleted                   int64            `json:"deleted"`
+	Audited                   int64            `json:"audited"`
+	Markers                   int64            `json:"markers"`
+	NetBodyColumnBytesRemoved int64            `json:"net_body_column_bytes_removed"`
+	Retained                  map[string]int64 `json:"retained"`
+	CommitState               string           `json:"last_commit_state"`
+	StopReason                string           `json:"stop_reason,omitempty"`
+	SQLiteCode                int              `json:"last_sqlite_code,omitempty"`
 }
 type Pages struct {
 	DatabaseBytes int64 `json:"database_bytes"`
-	WALBytes int64 `json:"wal_bytes"`
-	PageSize int64 `json:"page_size"`
-	PageCount int64 `json:"page_count"`
+	WALBytes      int64 `json:"wal_bytes"`
+	PageSize      int64 `json:"page_size"`
+	PageCount     int64 `json:"page_count"`
 	FreelistPages int64 `json:"freelist_pages"`
 }
 type Report struct {
