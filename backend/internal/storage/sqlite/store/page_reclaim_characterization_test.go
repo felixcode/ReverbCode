@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,6 +27,25 @@ func reclaimState(t *testing.T, db maintenanceDB) (r reclaimTestState) {
 
 // Fixture setup uses DELETE journaling, then selects WAL only for these tiny
 // disposable DBs. The production feature must not change journal/auto-vacuum mode.
+func reclaimReadonlyDSN(path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	return u.String() + "?mode=ro&_pragma=busy_timeout(0)"
+}
+
+func requireReclaimReadonly(t *testing.T, c *sql.Conn) {
+	t.Helper()
+	_, err := c.ExecContext(context.Background(), `UPDATE payloads SET body=body WHERE id=127`)
+	var coded interface{ Code() int }
+	if !errors.As(err, &coded) || coded.Code()&255 != 8 {
+		t.Fatal("connection is not SQLITE_READONLY", err)
+	}
+	// A real own-main read, fully drained, establishes pager/WAL association.
+	var count int
+	if err = c.QueryRowContext(context.Background(), `SELECT count(*) FROM main.payloads`).Scan(&count); err != nil || count != 1 {
+		t.Fatal(count, err)
+	}
+}
+
 func reclaimFixture(t *testing.T) (*sql.DB, *sql.DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ao.db")
@@ -60,7 +81,7 @@ func reclaimFixture(t *testing.T) (*sql.DB, *sql.DB, string) {
 	if _, err = w.Exec(`PRAGMA wal_autocheckpoint=0`); err != nil {
 		t.Fatal(err)
 	}
-	r, err := sql.Open("sqlite", path+"?mode=ro&_pragma=busy_timeout(0)")
+	r, err := sql.Open("sqlite", reclaimReadonlyDSN(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,10 +336,7 @@ func TestPageReclaimCharacterizationFinalReadonlyCloseAndReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var count int
-			if err = keeper.QueryRowContext(context.Background(), `SELECT count(*) FROM payloads`).Scan(&count); err != nil || count != 1 {
-				t.Fatal(count, err)
-			}
+			requireReclaimReadonly(t, keeper)
 			writer, err := w.Conn(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -338,6 +356,11 @@ func TestPageReclaimCharacterizationFinalReadonlyCloseAndReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			mainBefore, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeSHA := sha256.Sum256(mainBefore)
 			walBefore, err := os.Stat(path + "-wal")
 			if err != nil {
 				t.Fatal(err)
@@ -361,14 +384,23 @@ func TestPageReclaimCharacterizationFinalReadonlyCloseAndReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			walAfter, err := os.Stat(path + "-wal")
+			walAfter, walErr := os.Stat(path + "-wal")
+			walBytes := int64(0)
+			if walErr == nil {
+				walBytes = walAfter.Size()
+			} else if !os.IsNotExist(walErr) {
+				t.Fatal(walErr)
+			}
+			mainAfter, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if before.Size() != after.Size() || walBefore.Size() != walAfter.Size() {
-				t.Fatal("final readonly close changed DB/WAL lengths", before.Size(), after.Size(), walBefore.Size(), walAfter.Size())
+			afterSHA := sha256.Sum256(mainAfter)
+			t.Logf("writer_discarded=%t final_ro_close_main_delta=%d main_hash_equal=%t wal_before=%d wal_after_present=%t wal_after=%d", discardWriter, after.Size()-before.Size(), beforeSHA == afterSHA, walBefore.Size(), walErr == nil, walBytes)
+			if before.Size() != after.Size() || beforeSHA != afterSHA {
+				t.Fatal("final readonly close changed main bytes")
 			}
-			reopened, err := sql.Open("sqlite", path+"?mode=ro&_pragma=busy_timeout(0)")
+			reopened, err := sql.Open("sqlite", reclaimReadonlyDSN(path))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -385,7 +417,42 @@ func TestPageReclaimCharacterizationFinalReadonlyCloseAndReopen(t *testing.T) {
 			if reopenedMain.Size() != before.Size() {
 				t.Fatal("readonly reopen checkpointed")
 			}
-			t.Logf("writer_discarded=%t final_ro_close_main_delta=%d wal_bytes=%d reopen_committed_value=true", discardWriter, after.Size()-before.Size(), walAfter.Size())
+			t.Logf("writer_discarded=%t final_ro_close_main_delta=%d wal_bytes=%d reopen_committed_value=true", discardWriter, after.Size()-before.Size(), walBytes)
+		})
+	}
+}
+
+func TestPageReclaimCharacterizationURIReadonlyProof(t *testing.T) {
+	for _, uri := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain_path", true: "file_uri"}[uri], func(t *testing.T) {
+			w, _, path := reclaimFixture(t)
+			dsn := path + "?mode=ro&_pragma=busy_timeout(0)"
+			if uri {
+				dsn = reclaimReadonlyDSN(path)
+			}
+			pool, err := sql.Open("sqlite", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Close()
+			conn, err := pool.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			_, err = conn.ExecContext(context.Background(), `UPDATE payloads SET body=body WHERE id=127`)
+			var coded interface{ Code() int }
+			readonly := errors.As(err, &coded) && coded.Code()&255 == 8
+			t.Logf("file_uri=%t actual_sqlite_readonly=%t", uri, readonly)
+			if uri {
+				requireReclaimReadonly(t, conn)
+			} else if err != nil {
+				t.Fatal("plain DSN behavior changed", err)
+			}
+			var count int
+			if err = w.QueryRow(`SELECT count(*) FROM payloads`).Scan(&count); err != nil || count != 1 {
+				t.Fatal(count, err)
+			}
 		})
 	}
 }
