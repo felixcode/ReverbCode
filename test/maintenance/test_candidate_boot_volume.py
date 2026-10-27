@@ -18,11 +18,11 @@ def receipt():
     return {"status": "verified_private_copy_run", "operation": "rowid-rebuild",
             "run": "ao-copy-" + "a" * 32, "volume": "ao-copy-" + "a" * 32 + "-private",
             "volume_nonce": "b" * 32, "copy_stat": [1, 2, 1000, 1000, 0o600, 1, 4096],
-            "stopped_writer_retired": True, "source_unchanged": True,
+            "stopped_writer_retired": True, "container_exit_code": 0, "source_sha256": "d" * 64, "source_unchanged": True,
             "volume_remaining_container_references": 0, "closed_copy_sha256": "c" * 64,
             "tool_report": {"status": "complete_unpublished", "auto_vacuum": 2,
                             "source_integrity_checked": True, "source_read_only_fds": True,
-                            "candidate_sha256": "c" * 64}}
+                            "candidate_sha256": "c" * 64, "source_sha256": "d" * 64}}
 
 
 def budget():
@@ -40,7 +40,7 @@ class CandidateContracts(unittest.TestCase):
 
     def test_chain_requires_full_clean_and_unpublished(self):
         r = dict(status="complete_unpublished_chain", published=False,
-                 first={"full_clean_complete": True}, second=receipt())
+                 first={"full_clean_complete": True, "closed_copy_sha256": "d" * 64}, second=receipt())
         self.assertEqual(boot.candidate(r), boot.candidate(r["second"]))
         for field in ("published", "full_clean_complete"):
             with self.subTest(field=field):
@@ -53,7 +53,7 @@ class CandidateContracts(unittest.TestCase):
                     boot.candidate(bad)
 
     def test_partial_unknown_identity_and_side_proofs_are_rejected(self):
-        changes = [("status", "partial"), ("operation", "history-clean"),
+        changes = [("status", "partial"), ("operation", "history-clean"), ("container_exit_code", 1), ("container_exit_code", False), ("source_sha256", "e" * 64),
                    ("stopped_writer_retired", False), ("source_unchanged", False),
                    ("volume_remaining_container_references", 1), ("closed_copy_sha256", "d" * 64),
                    ("volume", "foreign"), ("volume_nonce", "invalid")]

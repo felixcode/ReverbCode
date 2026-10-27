@@ -33,11 +33,15 @@ def candidate(receipt):
     if receipt.get("status") == "complete_unpublished_chain":
         if receipt.get("published") is not False or receipt.get("first", {}).get("full_clean_complete") is not True:
             raise ValueError("cleanup_chain_incomplete")
+        if receipt["first"].get("closed_copy_sha256") != receipt["second"].get("source_sha256"):
+            raise ValueError("cleanup_rebuild_source_mismatch")
         receipt = receipt["second"]
     tool = receipt.get("tool_report", {})
     if (receipt.get("status") != "verified_private_copy_run" or receipt.get("operation") != "rowid-rebuild"
             or receipt.get("stopped_writer_retired") is not True or receipt.get("source_unchanged") is not True
-            or receipt.get("volume_remaining_container_references") != 0
+            or type(receipt.get("container_exit_code")) is not int or receipt["container_exit_code"] != 0
+            or type(receipt.get("volume_remaining_container_references")) is not int or receipt["volume_remaining_container_references"] != 0
+            or receipt.get("source_sha256") != tool.get("source_sha256")
             or tool.get("status") != "complete_unpublished" or tool.get("auto_vacuum") != 2
             or tool.get("source_integrity_checked") is not True or tool.get("source_read_only_fds") is not True
             or receipt.get("closed_copy_sha256") != tool.get("candidate_sha256")):

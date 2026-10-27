@@ -29,7 +29,9 @@ stat/SHA and a different inode, fsyncs file/directory, opens the real Store, the
 uses the same daemon health/ready/own-PID and graceful-SIGTERM helper as the
 accepted fixture smoke. It reads only bounded scalar metadata before startup.
 
-The private boot **can write**: startup migration/reconciliation/janitors may
+The safe report separates the private DB/WAL/SHM stat tokens before and after
+Store/daemon startup, and reports observed file changes separately from possible
+new writes. The private boot **can write**: startup migration/reconciliation/janitors may
 change session/turn states or other data in that disposable copy. A real candidate
 with sessions is never called an empty database. The original queued input ID,
 same-client-ID idempotency and changed-payload CAS contract are checked through

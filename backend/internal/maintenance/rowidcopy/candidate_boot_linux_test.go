@@ -125,6 +125,22 @@ func candidateMeta(t *testing.T, data string) int64 {
 	return sessions
 }
 
+func privateBootFiles(t *testing.T, data string) map[string]any {
+	t.Helper()
+	state := map[string]any{}
+	for _, name := range []string{"ao.db", "ao.db-wal", "ao.db-shm"} {
+		info, err := os.Lstat(filepath.Join(data, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal("private_file_metadata")
+		}
+		state[name] = []any{candidateToken(info), info.ModTime().UnixNano()}
+	}
+	return state
+}
+
 func TestClosedCandidateBoot(t *testing.T) {
 	source := os.Getenv("AO_RECOVERY_CANDIDATE_SOURCE")
 	if source == "" {
@@ -149,6 +165,7 @@ func TestClosedCandidateBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	initialFiles := privateBootFiles(t, data)
 	count := candidateMeta(t, data)
 	// This Store open verifies the real current schema, before the same daemon
 	// helper used by the accepted empty-fixture smoke opens the private copy.
@@ -158,9 +175,11 @@ func TestClosedCandidateBoot(t *testing.T) {
 	}
 	s.Close()
 	bootRecoveryData(t, "/tool/ao", data, false)
+	finalFiles := privateBootFiles(t, data)
 	value := map[string]any{"status": "private_candidate_boot_passed", "source_sha256": sha,
 		"copy_bytes": token[6], "session_rows_before": count, "source_writes": false,
-		"private_copy_new_writes_possible": true, "health_ready_own_pid": true, "graceful_stop": true,
+		"private_copy_new_writes_possible": true, "application_startup_writes_observed": !reflect.DeepEqual(initialFiles, finalFiles),
+		"private_files_before": initialFiles, "private_files_after": finalFiles, "health_ready_own_pid": true, "graceful_stop": true,
 		"actual_native_replay": "U_not_exercised", "provider_compatibility": "U_not_exercised"}
 	bytes, _ := json.Marshal(value)
 	if err = os.WriteFile("/work/boot-result-safe.json", append(bytes, '\n'), 0600); err != nil {
