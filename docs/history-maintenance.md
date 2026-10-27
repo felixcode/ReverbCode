@@ -119,3 +119,10 @@ See [raw history audit minimization](operations/raw-history-audit.md) for comple
 inline audit recognition, the separate digest domains, body-less raw handling,
 and the default-preview **new private copy only** audit-fold tool. This does not
 remove projection/replay markers or add a live database migration endpoint.
+
+## Offline rehearsal
+
+The separate [offline history copy cleanup](operations/offline-history-copy.md)
+runner reuses these exact application rules with a historical clock on an
+exclusively new private copy. It adds no daemon route or live cleanup setting,
+and performs no VACUUM or production database replacement.
