@@ -88,7 +88,7 @@ func TestRowIDRebuildTypedValuesTriggersSequencesAndCuts(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if r.Status != "complete_unpublished" || r.AutoVacuum != 2 || !r.SourceReadOnlyFDs || r.CandidateSHA256 == "" {
+	if r.Status != "complete_unpublished" || r.AutoVacuum != 2 || !r.SourceReadOnlyFDs || !r.SourceIntegrityChecked || r.CandidateSHA256 == "" {
 		t.Fatalf("missing proof: %+v", r)
 	}
 	after, e := os.ReadFile(p)
@@ -123,6 +123,30 @@ func TestRowIDRebuildTypedValuesTriggersSequencesAndCuts(t *testing.T) {
 	}
 	if _, e = Run(context.Background(), o); e == nil {
 		t.Fatal("existing candidate directory accepted")
+	}
+}
+
+func TestRowIDRebuildRefusesCorruptSourcePage(t *testing.T) {
+	p := snapshot(t, `CREATE TABLE t(id TEXT PRIMARY KEY);INSERT INTO t(rowid,id) VALUES(17,'fixture');`)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 8192 || b[4096] != 13 {
+		t.Fatal("unexpected synthetic table-page layout")
+	}
+	// Corrupt the freeblock pointer while leaving schema and row bytes intact.
+	// A copy of only readable logical rows must not silently repair this source.
+	b[4097], b[4098] = 0, 1
+	if err = os.WriteFile(p, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	o := opts(t, p)
+	if _, err = Run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "source_integrity_check_failed") {
+		t.Fatal("corrupt source was not rejected before copying", err)
+	}
+	if _, err = os.Stat(filepath.Join(o.Directory, "rowid-rebuild-report.json")); !os.IsNotExist(err) {
+		t.Fatal("failure published success receipt")
 	}
 }
 func TestRowIDRebuildCurrentApplicationSchema(t *testing.T) {
@@ -282,7 +306,7 @@ func TestRowIDRebuildUTF16EncodingAndQuotedNames(t *testing.T) {
 }
 
 func TestTypedVerificationDetectsValuesBeyondNULAndStorageClass(t *testing.T) {
-	for _,mutation := range []string{
+	for _, mutation := range []string{
 		`UPDATE main.t SET v=CAST(x'610063' AS TEXT)`,
 		`UPDATE main.t SET v=x'610062'`,
 		`UPDATE main.t SET n=1.0`,
@@ -290,15 +314,30 @@ func TestTypedVerificationDetectsValuesBeyondNULAndStorageClass(t *testing.T) {
 	} {
 		p := snapshot(t, `CREATE TABLE t(id TEXT PRIMARY KEY,v,n);INSERT INTO t(rowid,id,v,n) VALUES(17,'id',CAST(x'610062' AS TEXT),1);`)
 		db, err := sql.Open("sqlite", ":memory:")
-		if err != nil {t.Fatal(err)}
+		if err != nil {
+			t.Fatal(err)
+		}
 		c, err := db.Conn(context.Background())
-		if err != nil {t.Fatal(err)}
-		if _,err=c.ExecContext(context.Background(),`ATTACH DATABASE ? AS sealed`,p);err!=nil{t.Fatal(err)}
-		if _,err=c.ExecContext(context.Background(),`CREATE TABLE main.t(id TEXT PRIMARY KEY,v,n);INSERT INTO main.t(rowid,id,v,n) SELECT rowid,id,v,n FROM sealed.t;`);err!=nil{t.Fatal(err)}
-		table:=table{name:"t",rowid:"rowid",columns:[]string{"id","v","n"}}
-		if err=verifyValues(context.Background(),c,table);err!=nil{t.Fatal("equal fixture rejected",err)}
-		if _,err=c.ExecContext(context.Background(),mutation);err!=nil{t.Fatal(err)}
-		if err=verifyValues(context.Background(),c,table);err==nil{t.Fatal("typed/ROWID corruption accepted")}
-		c.Close();db.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = c.ExecContext(context.Background(), `ATTACH DATABASE ? AS sealed`, p); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = c.ExecContext(context.Background(), `CREATE TABLE main.t(id TEXT PRIMARY KEY,v,n);INSERT INTO main.t(rowid,id,v,n) SELECT rowid,id,v,n FROM sealed.t;`); err != nil {
+			t.Fatal(err)
+		}
+		table := table{name: "t", rowid: "rowid", columns: []string{"id", "v", "n"}}
+		if err = verifyValues(context.Background(), c, table); err != nil {
+			t.Fatal("equal fixture rejected", err)
+		}
+		if _, err = c.ExecContext(context.Background(), mutation); err != nil {
+			t.Fatal(err)
+		}
+		if err = verifyValues(context.Background(), c, table); err == nil {
+			t.Fatal("typed/ROWID corruption accepted")
+		}
+		c.Close()
+		db.Close()
 	}
 }

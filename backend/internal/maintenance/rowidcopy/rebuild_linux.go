@@ -37,16 +37,17 @@ type TableReport struct {
 	RowIDSHA256  string `json:"rowid_sha256,omitempty"`
 }
 type Report struct {
-	Status            string        `json:"status"`
-	Apply             bool          `json:"apply"`
-	SourceSHA256      string        `json:"source_sha256"`
-	CandidateSHA256   string        `json:"candidate_sha256,omitempty"`
-	SourceBytes       int64         `json:"source_bytes"`
-	CandidateBytes    int64         `json:"candidate_bytes"`
-	AutoVacuum        int           `json:"auto_vacuum"`
-	SchemaObjects     int           `json:"schema_objects"`
-	Tables            []TableReport `json:"tables"`
-	SourceReadOnlyFDs bool          `json:"source_read_only_fds"`
+	Status                 string        `json:"status"`
+	Apply                  bool          `json:"apply"`
+	SourceSHA256           string        `json:"source_sha256"`
+	CandidateSHA256        string        `json:"candidate_sha256,omitempty"`
+	SourceBytes            int64         `json:"source_bytes"`
+	CandidateBytes         int64         `json:"candidate_bytes"`
+	AutoVacuum             int           `json:"auto_vacuum"`
+	SchemaObjects          int           `json:"schema_objects"`
+	Tables                 []TableReport `json:"tables"`
+	SourceReadOnlyFDs      bool          `json:"source_read_only_fds"`
+	SourceIntegrityChecked bool          `json:"source_integrity_checked"`
 }
 type object struct{ kind, name, table, ddl string }
 type table struct {
@@ -471,6 +472,11 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 			return report, err
 		}
 	}
+	var sourceCheck string
+	if err = c.QueryRowContext(ctx, `PRAGMA sealed.integrity_check(1)`).Scan(&sourceCheck); err != nil || sourceCheck != "ok" {
+		return report, errors.New("source_integrity_check_failed")
+	}
+	report.SourceIntegrityChecked = true
 	if _, err = c.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return report, err
 	}

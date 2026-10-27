@@ -81,6 +81,8 @@ the explicitly selected authorized remote-compute host.
   never silently omitted or recomputed. A source containing statistics needs a
   separately reviewed preservation implementation before it is supported.
 
+The source must first pass full `integrity_check(1)` on its read-only connection;
+the rebuild does not silently repair unreadable or corrupt source structures.
 Before commit, each table has matching row counts, typed binary values and row
 identity; ordinary tables also have independent ordered-ROWID SHA-256 digests on
 both sides. The candidate must pass full `integrity_check(1)` and
@@ -89,7 +91,7 @@ hashed, and checked for inode/permission stability. No body, prompt, token,
 credential or source row ID is logged.
 
 `rowid-rebuild-report.json` contains status `complete_unpublished`, source and
-candidate SHA-256/bytes, schema-object count, actual read-only FD proof, and per
+candidate SHA-256/bytes, schema-object count, source-integrity and actual read-only FD proof, and per
 table row counts/ordered-ROWID digests. This proves a static copy's preservation;
 it does not prove a production swap, replay, safe shutdown, sustained retention
 capacity, or filesystem savings before actual candidate measurement.
