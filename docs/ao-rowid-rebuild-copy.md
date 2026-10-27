@@ -103,4 +103,3 @@ WITHOUT ROWID tables, NULL/BLOB/NUL/invalid-UTF8 TEXT, storage types, sequence h
 watermarks, CDC trigger silence, UTF-16, quoting, current application schema,
 foreign-key failure and source/target path/reference/permission/digest guards.
 The CLI build and `-h` smoke make no application or network requests.
-
