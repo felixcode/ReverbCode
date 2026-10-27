@@ -14,6 +14,7 @@ import uuid
 
 HELPER_REVISION = "f8f04c8a36394b75dc4243e360c08f7ffa6e6522"
 HELPER_SHA256 = "21884ae9d92572fba8220f53d0fa4558a2671bce27abcb2a39fd081d8b80c88e"
+CLEAN_STAGES = ["raw", "outputs", "message", "activity", "turn", "session", "builtin:change_log", "builtin:telemetry_event", "builtin:notifications", "builtin:agent_switch_failure_outbox", "builtin:agent_switch_failure_receipts"]
 
 
 def helper(path):
@@ -29,33 +30,74 @@ def helper(path):
     return module
 
 
-def candidate(receipt):
-    if receipt.get("status") == "complete_unpublished_chain":
-        if receipt.get("published") is not False or receipt.get("first", {}).get("full_clean_complete") is not True:
-            raise ValueError("cleanup_chain_incomplete")
-        if receipt["first"].get("closed_copy_sha256") != receipt["second"].get("source_sha256"):
-            raise ValueError("cleanup_rebuild_source_mismatch")
-        receipt = receipt["second"]
-    tool = receipt.get("tool_report", {})
-    if (receipt.get("status") != "verified_private_copy_run" or receipt.get("operation") != "rowid-rebuild"
-            or receipt.get("stopped_writer_retired") is not True or receipt.get("source_unchanged") is not True
-            or type(receipt.get("container_exit_code")) is not int or receipt["container_exit_code"] != 0
-            or type(receipt.get("volume_remaining_container_references")) is not int or receipt["volume_remaining_container_references"] != 0
-            or receipt.get("source_sha256") != tool.get("source_sha256")
-            or tool.get("status") != "complete_unpublished" or tool.get("auto_vacuum") != 2
-            or tool.get("source_integrity_checked") is not True or tool.get("source_read_only_fds") is not True
-            or receipt.get("closed_copy_sha256") != tool.get("candidate_sha256")):
-        raise ValueError("closed_typed_candidate_required")
-    run, volume, nonce = receipt["run"], receipt["volume"], receipt["volume_nonce"]
-    if (not re.fullmatch(r"ao-copy-[0-9a-f]{32}", run) or volume != run + "-private"
-            or not re.fullmatch(r"[0-9a-f]{32}", nonce)
-            or not re.fullmatch(r"[0-9a-f]{64}", receipt["closed_copy_sha256"])):
+def sha256_value(value):
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def closed_receipt(receipt, operation):
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("tool_report"), dict):
+        raise ValueError("closed_typed_receipt_shape")
+    tool = receipt["tool_report"]
+    if (receipt.get("status") != "verified_private_copy_run" or receipt.get("operation") != operation
+            or any(receipt.get(k) is not True for k in ("stopped_writer_retired", "source_unchanged", "source_readonly_mount", "output_only_private_volume"))
+            or any(type(receipt.get(k)) is not int or receipt[k] != 0 for k in ("container_exit_code", "volume_remaining_container_references"))
+            or not all(sha256_value(v) for v in (receipt.get("source_sha256"), receipt.get("closed_copy_sha256"), tool.get("source_sha256")))
+            or receipt["source_sha256"] != tool["source_sha256"]):
+        raise ValueError("closed_typed_receipt_required")
+    run, volume, nonce = receipt.get("run"), receipt.get("volume"), receipt.get("volume_nonce")
+    if (type(run) is not str or not re.fullmatch(r"ao-copy-[0-9a-f]{32}", run) or volume != run + "-private"
+            or type(nonce) is not str or not re.fullmatch(r"[0-9a-f]{32}", nonce)):
         raise ValueError("candidate_volume_identity")
-    token = receipt["copy_stat"]
-    if (len(token) != 7 or any(type(v) is not int or v < 0 for v in token)
+    token = receipt.get("copy_stat")
+    if (not isinstance(token, list) or len(token) != 7 or any(type(v) is not int or v < 0 for v in token)
             or token[2:6] != [1000, 1000, 0o600, 1] or token[6] <= 0):
         raise ValueError("candidate_private_token")
-    return run, volume, nonce, token, receipt["closed_copy_sha256"]
+    return (run, volume, nonce, token, receipt["closed_copy_sha256"]), tool
+
+
+def candidate(receipt, managed=None):
+    if not isinstance(receipt, dict):
+        raise ValueError("closed_typed_receipt_shape")
+    if receipt.get("status") == "complete_unpublished_chain":
+        first = receipt.get("first")
+        identity, clean = closed_receipt(first, "history-clean")
+        stages = clean.get("stages")
+        fold = clean.get("raw_audit_fold")
+        if (receipt.get("published") is not False or first.get("full_clean_complete") is not True
+                or type(first.get("full_clean_stages")) is not int or first["full_clean_stages"] != 11
+                or clean.get("status") != "complete" or clean.get("complete") is not True or clean.get("clean_requested") is not True
+                or not isinstance(stages, list) or len(stages) != 11
+                or any(not isinstance(v, dict) or v.get("complete") is not True or v.get("coverage_verified") is not True for v in stages)
+                or [v.get("stage") for v in stages] != CLEAN_STAGES
+                or not isinstance(fold, dict) or fold.get("status") != "complete" or fold.get("complete") is not True or fold.get("apply") is not True
+                or not sha256_value(fold.get("source_sha256")) or fold["source_sha256"] != first["source_sha256"]):
+            raise ValueError("cleanup_chain_incomplete")
+        second = receipt.get("second")
+        rebuilt, _ = closed_receipt(second, "rowid-rebuild")
+        if identity[4] != second["source_sha256"] or identity[1] == rebuilt[1]:
+            raise ValueError("cleanup_rebuild_source_mismatch")
+        unknowns = first.get("full_clean_unknowns")
+        if not isinstance(unknowns, list) or unknowns and managed is None:
+            raise ValueError("cleanup_unknown_identity_unproved")
+        deferred = managed.deferred_sequence(first) if unknowns else []
+        resolved = receipt.get("resolved_identity_checks")
+        if receipt.get("deferred_identity_checks") != deferred or not isinstance(resolved, list) or len(resolved) != len(deferred):
+            raise ValueError("cleanup_deferred_identity_unproved")
+        for pending, proof in zip(deferred, resolved):
+            tables = second["tool_report"].get("tables")
+            rows = [v for v in tables if isinstance(v, dict) and v.get("name") == "sqlite_sequence"] if isinstance(tables, list) else []
+            if (len(rows) != 1 or type(rows[0].get("rows")) is not int or rows[0]["rows"] != pending["rows"]
+                    or rows[0].get("without_rowid") is not False or not sha256_value(rows[0].get("rowid_sha256"))
+                    or proof != pending | {"status": "verified_by_rebuild_typed_values_rowid_and_sequence", "rebuild_big_endian_rowid_sha256": rows[0]["rowid_sha256"]}):
+                raise ValueError("cleanup_resolved_identity_unproved")
+        receipt = second
+    identity, tool = closed_receipt(receipt, "rowid-rebuild")
+    if (tool.get("status") != "complete_unpublished" or tool.get("apply") is not True
+            or type(tool.get("auto_vacuum")) is not int or tool["auto_vacuum"] != 2
+            or tool.get("source_integrity_checked") is not True or tool.get("source_read_only_fds") is not True
+            or not sha256_value(tool.get("candidate_sha256")) or identity[4] != tool["candidate_sha256"]):
+        raise ValueError("closed_typed_candidate_required")
+    return identity
 
 
 def request(value, m):
@@ -75,7 +117,7 @@ def request(value, m):
             or b["memory_bytes"] > 2 << 30 or b["tmp_bytes"] > 512 << 20 or b["log_bytes"] > 1 << 20
             or b["outer_seconds"] <= b["wall_seconds"] + b["control_seconds"] or b["pids"] > 256 or b["nice"] != 19 or b["io_class"] != 3):
         raise ValueError("boot_budget")
-    return candidate(m.load_manifest(value["receipt"], value["receipt_sha256"]))
+    return candidate(m.load_manifest(value["receipt"], value["receipt_sha256"]), m)
 
 
 def execute(value, m):
