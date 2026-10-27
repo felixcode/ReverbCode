@@ -303,3 +303,89 @@ func TestPageReclaimCharacterizationWriterCloseAndDiscard(t *testing.T) {
 		}
 	}
 }
+
+// A keeper is temporary: its own last physical close must also leave WAL alone.
+// Force MaxIdleConns(0) so Conn.Close cannot merely return a live idle handle.
+func TestPageReclaimCharacterizationFinalReadonlyCloseAndReopen(t *testing.T) {
+	for _, discardWriter := range []bool{false, true} {
+		t.Run(map[bool]string{false: "close", true: "discard"}[discardWriter], func(t *testing.T) {
+			w, r, path := reclaimFixture(t)
+			r.SetMaxIdleConns(0)
+			keeper, err := r.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			if err = keeper.QueryRowContext(context.Background(), `SELECT count(*) FROM payloads`).Scan(&count); err != nil || count != 1 {
+				t.Fatal(count, err)
+			}
+			writer, err := w.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := writer.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = tx.Exec(`UPDATE payloads SET body='committed-wal-sentinel' WHERE id=127`); err != nil {
+				t.Fatal(err)
+			}
+			drainSingleReclaim(t, context.Background(), tx)
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			walBefore, err := os.Stat(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if discardWriter {
+				if err = writer.Raw(func(any) error { return driver.ErrBadConn }); !errors.Is(err, driver.ErrBadConn) {
+					t.Fatal(err)
+				}
+			}
+			_ = writer.Close()
+			if err = w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err = keeper.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err = r.Close(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			walAfter, err := os.Stat(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Size() != after.Size() || walBefore.Size() != walAfter.Size() {
+				t.Fatal("final readonly close changed DB/WAL lengths", before.Size(), after.Size(), walBefore.Size(), walAfter.Size())
+			}
+			reopened, err := sql.Open("sqlite", path+"?mode=ro&_pragma=busy_timeout(0)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body string
+			err = reopened.QueryRow(`SELECT CAST(body AS TEXT) FROM payloads WHERE id=127`).Scan(&body)
+			closeErr := reopened.Close()
+			if err != nil || closeErr != nil || body != "committed-wal-sentinel" {
+				t.Fatal("closed WAL not visible after reopen", err, closeErr)
+			}
+			reopenedMain, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reopenedMain.Size() != before.Size() {
+				t.Fatal("readonly reopen checkpointed")
+			}
+			t.Logf("writer_discarded=%t final_ro_close_main_delta=%d wal_bytes=%d reopen_committed_value=true", discardWriter, after.Size()-before.Size(), walAfter.Size())
+		})
+	}
+}
