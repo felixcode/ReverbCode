@@ -88,3 +88,48 @@ func TestCopyReadDeadlineExposesPrewritePhase(t *testing.T) {
 		t.Fatal(result, err)
 	}
 }
+
+func TestCopyFastRawUnknownOwnerAndProtectedTurnKeepBodiesAndMarkers(t *testing.T) {
+	for _, kind := range []string{"empty_unknown_owner", "body_unknown_owner", "empty_running_turn", "body_running_turn"} {
+		t.Run(kind, func(t *testing.T) {
+			w, r := maintenancePrepareFixture(t)
+			ctx := context.Background()
+			now := time.Now().UTC()
+			cutoff := now.Add(-48 * time.Hour)
+			body := `{"providerTurnId":"native-old","text":""}`
+			if strings.HasPrefix(kind, "body_") {
+				body = `{"providerTurnId":"native-old","text":"PROTECTED"}`
+			}
+			if _, err := w.Exec(`UPDATE conversation_provider_events SET payload_json=? WHERE id=1`, body); err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasSuffix(kind, "unknown_owner") {
+				w.Exec(`UPDATE conversation_provider_events SET session_id='unknown' WHERE id=1`)
+			} else {
+				w.Exec(`UPDATE conversation_turns SET state='running' WHERE id='turn'`)
+			}
+			plans, err := prepareMaintenanceRows(ctx, r, maintenanceStages["raw"], "raw", "id", []any{int64(1)}, DefaultHistoryMaintenanceOptions(), now, cutoff, true)
+			if err != nil || len(plans) != 1 || plans[0].noRawBody != strings.HasPrefix(kind, "empty_") {
+				t.Fatal(plans, err)
+			}
+			tx, _ := w.BeginTx(ctx, nil)
+			result := HistoryMaintenanceResult{Retained: map[string]int{}}
+			advanced, err := applyMaintenancePrepared(ctx, tx, maintenanceStages["raw"], "raw", "id", plans[0], cutoff, now, &result)
+			if err != nil || !advanced || result.Compacted != 0 || result.Audited != 0 || result.Markers != 0 {
+				tx.Rollback()
+				t.Fatal(result, err)
+			}
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			var after string
+			var markers int
+			if err = w.QueryRow(`SELECT payload_json FROM conversation_provider_events WHERE id=1`).Scan(&after); err != nil || after != body {
+				t.Fatal("body changed", err)
+			}
+			if err = w.QueryRow(`SELECT count(*) FROM ao_history_retention`).Scan(&markers); err != nil || markers != 0 {
+				t.Fatal("marker changed", err)
+			}
+		})
+	}
+}
