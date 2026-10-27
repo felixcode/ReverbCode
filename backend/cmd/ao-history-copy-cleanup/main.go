@@ -28,6 +28,7 @@ func main() {
 	flag.DurationVar(&o.Maintenance.Retention, "retention", 47*time.Hour, "historical retention horizon, positive and at most 48h")
 	flag.Int64Var(&o.Copy.MaxBytes, "max-copy-bytes", 32<<30, "maximum snapshot file bytes")
 	flag.IntVar(&o.Maintenance.BatchRows, "batch-rows", 100, "maximum candidates per application batch")
+	flag.IntVar(&o.PrewriteRetries, "prewrite-retries", 8, "same-cursor row-halving retries only after deadline with no write transaction started")
 	flag.IntVar(&o.MaxBatches, "max-batches", 100000, "maximum application batches per stage and raw fold")
 	flag.Int64Var(&o.Maintenance.MaxRowBytes, "max-row-bytes", 8<<20, "maximum body bytes per row")
 	flag.Int64Var(&o.Maintenance.BatchBytes, "batch-bytes", 16<<20, "maximum body bytes prepared per batch")

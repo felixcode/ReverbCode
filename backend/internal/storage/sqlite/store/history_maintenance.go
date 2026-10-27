@@ -49,6 +49,7 @@ func (o HistoryMaintenanceOptions) Validate() error {
 }
 
 type HistoryMaintenanceResult struct {
+	Phase                   string         `json:"phase,omitempty"`
 	CommitState             string         `json:"commit_state"`
 	WriterReservedMS        float64        `json:"writer_reserved_ms"`
 	ConnectionRestoreFailed bool           `json:"connection_restore_failed"`
@@ -156,11 +157,11 @@ func (s *Store) MaintainHistorySnapshotBatch(ctx context.Context, req HistoryMai
 	if asOf.IsZero() || asOf.After(time.Now().UTC()) {
 		return HistoryMaintenanceResult{Status: "failed", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}, errors.New("invalid historical snapshot clock")
 	}
-	return s.maintainHistoryBatchAt(ctx, req, o, asOf.UTC())
+	return s.maintainHistoryBatchAt(ctx, req, o, asOf.UTC(), true)
 }
 
-func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenanceRequest, o HistoryMaintenanceOptions, now time.Time) (result HistoryMaintenanceResult, err error) {
-	result = HistoryMaintenanceResult{Status: "deferred", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}
+func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenanceRequest, o HistoryMaintenanceOptions, now time.Time, rawNoBodyFastPath ...bool) (result HistoryMaintenanceResult, err error) {
+	result = HistoryMaintenanceResult{Phase: "validation", Status: "deferred", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}
 	defer func() {
 		if err != nil {
 			result.Status = "failed"
@@ -235,6 +236,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	func() {
 		defer cancelRead()
 		defer func() { result.ReadMS = maintenanceMillis(readStarted) }()
+		result.Phase = "read_capability"
 		cap := s.MaintenanceCapability(readCtx)
 		if cap["schemaReady"] != true {
 			err = errors.New("retention schema unavailable")
@@ -246,6 +248,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		}
 		// Metadata size and body materialization share one bounded read-only
 		// snapshot, so a concurrent growing record cannot bypass byte limits.
+		result.Phase = "read_begin"
 		readTx, e := s.readDB.BeginTx(readCtx, &sql.TxOptions{ReadOnly: true})
 		if e != nil {
 			err = e
@@ -270,6 +273,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 				cursor = v
 			}
 		}
+		result.Phase = "read_candidates"
 		rows, e := readTx.QueryContext(readCtx, `SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>? ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`, cursor, o.BatchRows)
 		if e != nil {
 			err = e
@@ -296,16 +300,22 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			result.Status = "ok"
 			return
 		}
-		plans, err = prepareMaintenanceRows(readCtx, readTx, stage, req.Stage, key, ids, o, now, cutoff)
+		result.Phase = "read_prepare"
+		plans, err = prepareMaintenanceRows(readCtx, readTx, stage, req.Stage, key, ids, o, now, cutoff, rawNoBodyFastPath...)
 		if err == nil {
+			result.Phase = "read_commit"
 			err = readTx.Commit()
 		}
 	}()
 	if err != nil || result.Complete {
+		if err != nil && errors.Is(readCtx.Err(), context.DeadlineExceeded) {
+			err = errors.Join(err, readCtx.Err())
+		}
 		return result, err
 	}
 	// Every preparation SELECT is closed above. No read snapshot is pinned while
 	// waiting for the business writer, and no parsing/hash work occurs below.
+	result.Phase = "writer_admission"
 	waitStarted := time.Now()
 	if !s.writeMu.TryMaintenance() {
 		result.WaitMS = maintenanceMillis(waitStarted)
@@ -317,12 +327,15 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	defer func() { result.WriterReservedMS = maintenanceMillis(reservedAt) }()
 	writeCtx, cancel := context.WithTimeout(ctx, o.WriteBudget)
 	defer cancel()
+	result.Phase = "writer_connection"
 	connection, err := s.writeDB.Conn(writeCtx)
 	if err != nil {
 		return result, err
 	}
 	defer connection.Close()
+	result.Phase = "writer_setup"
 	err = withMaintenanceConnection(writeCtx, connection, &result, func() error {
+		result.Phase = "writer_begin"
 		tx, e := connection.BeginTx(writeCtx, nil)
 		result.WaitMS = maintenanceMillis(waitStarted)
 		if e != nil {
@@ -341,12 +354,14 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 				}
 			}
 		}()
+		result.Phase = "writer_validate"
 		if e = validateHistoryRetentionSchema(writeCtx, tx); e != nil {
 			return e
 		}
 		if e = validateMaintenancePolicy(writeCtx, tx); e != nil {
 			return e
 		}
+		result.Phase = "writer_apply"
 		for _, plan := range plans {
 			if writeCtx.Err() != nil {
 				break
@@ -367,6 +382,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		if e = writeCtx.Err(); e != nil {
 			return e
 		}
+		result.Phase = "writer_commit"
 		commitAt := time.Now()
 		result.CommitState = "unknown"
 		if e = tx.Commit(); e != nil {
@@ -378,6 +394,9 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		result.Status = "ok"
 		return nil
 	})
+	if err != nil && errors.Is(writeCtx.Err(), context.DeadlineExceeded) {
+		err = errors.Join(err, writeCtx.Err())
+	}
 	return result, err
 }
 
