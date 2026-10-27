@@ -3,13 +3,13 @@
 package rowidcopy
 
 import (
- "context"
- "errors"
- "os"
- "path/filepath"
- "strconv"
- "strings"
- "syscall"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 )
 
 func privateRegular(info os.FileInfo) bool {
@@ -140,4 +140,3 @@ func noOtherReferences(ctx context.Context, info os.FileInfo) error {
 	}
 	return nil
 }
-
