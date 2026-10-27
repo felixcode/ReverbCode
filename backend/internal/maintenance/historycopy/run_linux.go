@@ -30,20 +30,22 @@ type Options struct {
 	Progress    func(string, int64)
 }
 type StageReport struct {
-	Stage                     string           `json:"stage"`
-	Complete                  bool             `json:"complete"`
-	Batches                   int64            `json:"batches"`
-	ConfirmedBatches          int64            `json:"confirmed_batches"`
-	Scanned                   int64            `json:"scanned"`
-	Compacted                 int64            `json:"compacted"`
-	Deleted                   int64            `json:"deleted"`
-	Audited                   int64            `json:"audited"`
-	Markers                   int64            `json:"markers"`
-	NetBodyColumnBytesRemoved int64            `json:"net_body_column_bytes_removed"`
-	Retained                  map[string]int64 `json:"retained"`
-	CommitState               string           `json:"last_commit_state"`
-	StopReason                string           `json:"stop_reason,omitempty"`
-	SQLiteCode                int              `json:"last_sqlite_code,omitempty"`
+	Prefix                    store.HistoryMaintenancePrefixCoverage `json:"prefix_coverage"`
+	CoverageVerified          bool                                   `json:"coverage_verified"`
+	Stage                     string                                 `json:"stage"`
+	Complete                  bool                                   `json:"complete"`
+	Batches                   int64                                  `json:"batches"`
+	ConfirmedBatches          int64                                  `json:"confirmed_batches"`
+	Scanned                   int64                                  `json:"scanned"`
+	Compacted                 int64                                  `json:"compacted"`
+	Deleted                   int64                                  `json:"deleted"`
+	Audited                   int64                                  `json:"audited"`
+	Markers                   int64                                  `json:"markers"`
+	NetBodyColumnBytesRemoved int64                                  `json:"net_body_column_bytes_removed"`
+	Retained                  map[string]int64                       `json:"retained"`
+	CommitState               string                                 `json:"last_commit_state"`
+	StopReason                string                                 `json:"stop_reason,omitempty"`
+	SQLiteCode                int                                    `json:"last_sqlite_code,omitempty"`
 }
 type Pages struct {
 	DatabaseBytes int64 `json:"database_bytes"`
@@ -238,6 +240,20 @@ func Run(parent context.Context, o Options) (report Report, err error) {
 			o.Progress("maintenance_"+stage, 0)
 		}
 		r := StageReport{Stage: stage, Retained: map[string]int64{}, CommitState: "not_started"}
+		r.Prefix, err = s.HistoryMaintenanceScanPrefix(ctx, stage)
+		if err != nil {
+			r.StopReason = "scan_domain_unknown"
+			report.Stages = append(report.Stages, r)
+			return report, err
+		}
+		if r.Prefix.UnsupportedRows != 0 {
+			r.StopReason = "unsupported_prefix"
+			report.Stages = append(report.Stages, r)
+			report.Status = "partial"
+			report.StopReason = "unsupported_prefix"
+			break
+		}
+		r.CoverageVerified = true
 		cursor := ""
 		for batch := 0; batch < o.MaxBatches; batch++ {
 			if ctx.Err() != nil {

@@ -329,3 +329,63 @@ func TestHistoryCopyAllocationAggregateMatchesPageCensus(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryCopyRefusesUnsupportedScanPrefixes(t *testing.T) {
+	for _, kind := range []string{"zero-raw", "negative-raw", "empty-message", "null-message"} {
+		t.Run(kind, func(t *testing.T) {
+			source, _ := fixture(t)
+			db, err := sql.Open("sqlite", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "zero-raw":
+				_, err = db.Exec(`UPDATE conversation_provider_events SET id=0 WHERE id=1`)
+			case "negative-raw":
+				_, err = db.Exec(`UPDATE conversation_provider_events SET id=-1 WHERE id=1`)
+			case "empty-message":
+				_, err = db.Exec(`UPDATE conversation_messages SET id='' WHERE id='old-message'`)
+			case "null-message":
+				_, err = db.Exec(`UPDATE conversation_messages SET id=NULL WHERE id='old-message'`)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			b, err := os.ReadFile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := sha256.Sum256(b)
+			o := testOptions(source, hex.EncodeToString(h[:]), filepath.Join(t.TempDir(), "fresh"))
+			o.Clean = true
+			r, err := Run(context.Background(), o)
+			if err != nil || r.Complete || r.Status != "partial" || r.StopReason != "unsupported_prefix" {
+				t.Fatal("uncovered rows were declared fully scanned", r, err)
+			}
+			found := false
+			for _, stage := range r.Stages {
+				if stage.Prefix.UnsupportedRows == 1 && !stage.Complete && !stage.CoverageVerified && stage.StopReason == "unsupported_prefix" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("missing unsupported count", r)
+			}
+		})
+	}
+}
+func TestHistoryCopyIdentityRejectsInvalidTextKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid-key.sqlite3")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`CREATE TABLE keyed(id TEXT PRIMARY KEY);INSERT INTO keyed VALUES(CAST(x'80' AS TEXT));`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = CensusIdentity(context.Background(), db); err == nil {
+		t.Fatal("invalid UTF8 identity silently normalized")
+	}
+}

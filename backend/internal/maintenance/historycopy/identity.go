@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // TableIdentity is a versioned comparison interface for a later rebuild. Only
@@ -186,6 +187,10 @@ func CensusIdentity(ctx context.Context, db *sql.DB) ([]TableIdentity, error) {
 				case int64:
 					tuple[i] = []any{"integer", fmt.Sprint(x)}
 				case string:
+					if !utf8.ValidString(x) {
+						e = errors.New("identity_text_encoding_unknown")
+						break
+					}
 					tuple[i] = []any{"text", x}
 				case []byte:
 					tuple[i] = []any{"blob", hex.EncodeToString(x)}

@@ -49,6 +49,12 @@ agent_switch_failure_receipts. The final five use their installed application
 janitor predicates, with the fixed historical clock where applicable. Failed or
 unknown commits stop without advancing a confirmed cursor or inventing counts.
 A wall/batch cap or zero confirmed progress is partial, not complete.
+Before each stage, a readonly check reuses its existing table/PK metadata to
+count unsupported keys: nonpositive/NULL/noninteger numeric keys, and
+empty/NULL/nontext TEXT keys. The cursor lower-bound enum and count are reported;
+any unsupported prefix leaves complete=false. This verifies selector coverage,
+not eligibility: it does not compare a filtered candidate count with all table
+rows or expand deletion rules.
 
 All copy/batch/read/write/fold/wall/progress budgets are flags. Initial default
 wall budget is two hours; the executor must allow extra outer termination/report
@@ -63,7 +69,7 @@ The source and cleaned copy have one row-count/primary-key census per table.
 TEXT/composite primary keys retain an additional digest of their implicit ROWID
 mapping. INTEGER PRIMARY KEY alias detection checks for a separate PK index
 (the DESC exception); WITHOUT ROWID and no-key/virtual/unknown cases are explicit.
-Only type-tagged, JSON-framed key tuples enter SHA256; no row values are output.
+Only type-tagged, JSON-framed key tuples enter SHA256; no row values are output. Invalid UTF8 text keys refuse the identity proof rather than being silently normalized by JSON.
 The cleaned identity census is the baseline for a later rebuild comparison.
 Census reads do not expand arbitrary body columns. Each physical census walks
 [dbstat aggregate mode](https://www.sqlite.org/dbstat.html) once (one output row per B-tree, avoiding a multi-million-row external GROUP BY), reporting per-table/index page allocation, payload and in-page
