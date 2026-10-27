@@ -27,9 +27,11 @@ The old sidecar `original_sha256` hashes canonical JSON of
 `{"payload_json": original_payload_string}`. They intentionally differ and are
 never compared as equal. New inline `_retention.field_map_audit` preserves:
 
-- `object_kind = provider_event`, exact canonical integer `object_id`, and
-  `conversation_id` binding;
-- `field_map_original_sha256`, the second canonical-map digest.
+- exact canonical integer `id` and `conversation` binding (kind is always raw
+  `provider_event`, not another marker kind);
+- `sha256`, the second canonical-map digest, distinct from the enclosing raw
+  `original_sha256`. Concise keys avoid adding the old row/index duplication back
+  into the inline audit.
 
 The existing protocol, timestamp strings, fields, original byte count and raw
 payload digest are unchanged. Inline field lists are nonempty/unique, only use

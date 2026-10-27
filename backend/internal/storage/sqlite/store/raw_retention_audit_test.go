@@ -53,7 +53,7 @@ func TestRawAuditLosslessDomainsAndHeaders(t *testing.T) {
 		if audit["original_sha256"] == side.originalSHA {
 			t.Fatal("different SHA domains collapsed")
 		}
-		if audit["field_map_audit"].(map[string]any)["field_map_original_sha256"] != side.originalSHA {
+		if audit["field_map_audit"].(map[string]any)["sha256"] != side.originalSHA {
 			t.Fatal("canonical-map digest lost")
 		}
 		delete(before, "_retention")

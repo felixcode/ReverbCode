@@ -18,7 +18,7 @@ func rawFieldMapSHA(payload string) (string, error) {
 }
 
 func rawAuditBinding(row maintenanceRow, fieldMapSHA string) map[string]any {
-	return map[string]any{"object_kind": "provider_event", "object_id": maintenanceID(row["id"]), "conversation_id": row.text("conversation_id"), "field_map_original_sha256": fieldMapSHA}
+	return map[string]any{"id": maintenanceID(row["id"]), "conversation": row.text("conversation_id"), "sha256": fieldMapSHA}
 }
 
 func rawSHA(value any) bool {
@@ -113,7 +113,7 @@ func rawInlineAudit(ctx context.Context, row maintenanceRow, requireBinding bool
 		return obj, audit, !requireBinding
 	}
 	b, ok := binding.(map[string]any)
-	if !ok || len(b) != 4 || b["object_kind"] != "provider_event" || b["object_id"] != maintenanceID(row["id"]) || b["conversation_id"] != row.text("conversation_id") || !rawSHA(b["field_map_original_sha256"]) {
+	if !ok || len(b) != 3 || b["id"] != maintenanceID(row["id"]) || b["conversation"] != row.text("conversation_id") || !rawSHA(b["sha256"]) {
 		return obj, audit, false
 	}
 	return obj, audit, true
@@ -138,7 +138,7 @@ func losslessRawAudit(ctx context.Context, row maintenanceRow, side maintenanceA
 	}
 	if existing, yes := audit["field_map_audit"]; yes {
 		b, ok := existing.(map[string]any)
-		if !ok || b["field_map_original_sha256"] != side.originalSHA {
+		if !ok || b["sha256"] != side.originalSHA {
 			return "", false
 		}
 	} else {
