@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
