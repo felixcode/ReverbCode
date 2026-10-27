@@ -112,3 +112,10 @@ Byte admission uses [SQLite octet_length(column)](https://www.sqlite.org/lang_co
 The effective maximum row bytes is clamped to the batch byte budget. An oversized first record is retained and reported rather than causing a permanent zero-progress prefix. Outputs use their own projection: unrelated activity summary/detail bodies are not selected or charged as output data. Builtin deletion preparation retains exact bounded original column bytes for CAS; fresh installed janitor predicates remain authoritative in the write transaction.
 
 The writer checks optimized current byte-length metadata before evaluating body CAS. A record that grew between preparation and application is retained without loading the new oversized body for comparison.
+
+## Raw audit cost control
+
+See [raw history audit minimization](operations/raw-history-audit.md) for complete
+inline audit recognition, the separate digest domains, body-less raw handling,
+and the default-preview **new private copy only** audit-fold tool. This does not
+remove projection/replay markers or add a live database migration endpoint.

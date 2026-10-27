@@ -22,17 +22,18 @@ type maintenanceAudit struct {
 	bytes                                                                     int64
 }
 type maintenancePrepared struct {
-	id          any
-	row         maintenanceRow
-	cas         maintenanceRow
-	bodyColumns []string
-	builtin     bool
-	skip        string
-	proof       *maintenanceRawProof
-	updates     map[string]any
-	fields      []string
-	audits      []maintenanceAudit
-	size        int64
+	id            any
+	row           maintenanceRow
+	cas           maintenanceRow
+	bodyColumns   []string
+	builtin       bool
+	skip          string
+	proof         *maintenanceRawProof
+	updates       map[string]any
+	fields        []string
+	audits        []maintenanceAudit
+	inlineExpired bool
+	size          int64
 }
 
 func prepareMaintenanceRaw(ctx context.Context, row maintenanceRow) (*maintenanceRawProof, error) {
@@ -194,6 +195,11 @@ func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage mainten
 		}
 		if stageName == "raw" {
 			p.proof, err = prepareMaintenanceRaw(ctx, p.row)
+			_, _, p.inlineExpired = rawInlineAudit(ctx, p.row, true)
+		}
+		if p.inlineExpired && err == nil {
+			plans = append(plans, p)
+			continue
 		}
 		if err == nil {
 			var eligible bool
@@ -328,6 +334,10 @@ func applyMaintenancePrepared(ctx context.Context, tx *sql.Tx, stage maintenance
 		if !matches {
 			result.Retained["concurrent_body_or_owner_change"]++
 			return false, nil
+		}
+		if p.inlineExpired {
+			result.Retained["already_expired"]++
+			return true, nil
 		}
 		eligible, e := maintenanceEligibleWithProof(ctx, tx, current, stageName, cutoff, p.proof)
 		if e != nil {
