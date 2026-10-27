@@ -74,7 +74,8 @@ func CensusIdentity(ctx context.Context, db *sql.DB) ([]TableIdentity, error) {
 			out = append(out, r)
 			continue
 		}
-		cols, e := tx.QueryContext(ctx, `PRAGMA table_info(`+quoted(m.name)+`)`)
+		// Generated columns also shadow rowid/_rowid_/oid. table_info omits them.
+		cols, e := tx.QueryContext(ctx, `PRAGMA table_xinfo(`+quoted(m.name)+`)`)
 		if e != nil {
 			return out, e
 		}
@@ -85,10 +86,10 @@ func CensusIdentity(ctx context.Context, db *sql.DB) ([]TableIdentity, error) {
 		keys := []key{}
 		all := map[string]bool{}
 		for cols.Next() {
-			var n, nn, pk int
+			var n, nn, pk, hidden int
 			var name, typ string
 			var def any
-			if e = cols.Scan(&n, &name, &typ, &nn, &def, &pk); e != nil {
+			if e = cols.Scan(&n, &name, &typ, &nn, &def, &pk, &hidden); e != nil {
 				break
 			}
 			all[strings.ToLower(name)] = true

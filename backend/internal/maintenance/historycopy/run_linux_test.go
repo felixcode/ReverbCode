@@ -389,3 +389,49 @@ func TestHistoryCopyIdentityRejectsInvalidTextKeys(t *testing.T) {
 		t.Fatal("invalid UTF8 identity silently normalized")
 	}
 }
+
+func TestHistoryCopyIdentityDetectsGeneratedRowIDShadow(t *testing.T) {
+	for _, storage := range []string{"VIRTUAL", "STORED"} {
+		t.Run(storage, func(t *testing.T) {
+			db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "generated-shadow.sqlite3"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			_, err = db.Exec(`CREATE TABLE shadowed(id TEXT PRIMARY KEY, rowid INTEGER GENERATED ALWAYS AS (7) ` + storage + `); INSERT INTO shadowed(_rowid_,id) VALUES(17,'same-key');`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := CensusIdentity(context.Background(), db)
+			if err != nil || len(before) != 1 || before[0].UnknownReason != "" || before[0].RowIDMappingSHA256 == "" {
+				t.Fatal("missing real ROWID proof", before, err)
+			}
+			if _, err = db.Exec(`UPDATE shadowed SET _rowid_=99 WHERE id='same-key'`); err != nil {
+				t.Fatal(err)
+			}
+			after, err := CensusIdentity(context.Background(), db)
+			if err != nil || len(after) != 1 {
+				t.Fatal(after, err)
+			}
+			if before[0].Rows != after[0].Rows || before[0].IdentitySHA256 != after[0].IdentitySHA256 || before[0].RowIDMappingSHA256 == after[0].RowIDMappingSHA256 {
+				t.Fatal("generated rowid hid true _rowid_ remapping", before, after)
+			}
+		})
+	}
+}
+
+func TestHistoryCopyIdentityRefusesAllGeneratedRowIDAliases(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "all-generated-shadows.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE shadowed(id TEXT PRIMARY KEY, rowid INTEGER GENERATED ALWAYS AS (7), _rowid_ INTEGER GENERATED ALWAYS AS (8), oid INTEGER GENERATED ALWAYS AS (9)); INSERT INTO shadowed(id) VALUES('same-key');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := CensusIdentity(context.Background(), db)
+	if err != nil || len(r) != 1 || r[0].UnknownReason != "rowid_aliases_shadowed" || r[0].RowIDMappingSHA256 != "" {
+		t.Fatal("unreadable real ROWID was treated as proven", r, err)
+	}
+}
