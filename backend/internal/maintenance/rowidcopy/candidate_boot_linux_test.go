@@ -189,8 +189,11 @@ func TestClosedCandidateInputAndCopyBoundaries(t *testing.T) {
 				os.Symlink(source, link)
 				source = link
 			}
-			_, err := copyClosedCandidate(source, sha, t.TempDir(), token)
-			if (err == nil) != (kind == "valid") {
+			work := t.TempDir()
+			os.Chmod(work, 0700)
+			_, err := copyClosedCandidate(source, sha, work, token)
+			want := map[string]string{"wrong_digest": "candidate_copy_digest_or_length", "wrong_token": "candidate_token_mismatch", "sidecar": "candidate_sidecar", "symlink": "candidate_symlink_or_missing"}
+			if (err == nil) != (kind == "valid") || err != nil && err.Error() != want[kind] {
 				t.Fatal("copy_boundary_mismatch", kind, err)
 			}
 		})
@@ -210,6 +213,26 @@ func TestClosedNonemptyCandidateCopiesAndBootsWithoutNativeProvider(t *testing.T
 	if binary == "" {
 		t.Skip("built_binary_required")
 	}
+	data := rebuildRecoveryFixture(t, nonemptyBootSource(t))
+	source := filepath.Join(data, "ao.db")
+	contents, _ := os.ReadFile(source)
+	sum := sha256.Sum256(contents)
+	info, _ := os.Stat(source)
+	work := t.TempDir()
+	os.Chmod(work, 0700)
+	copy, err := copyClosedCandidate(source, hex.EncodeToString(sum[:]), work, candidateToken(info))
+	if err != nil || candidateMeta(t, copy) != 1 {
+		t.Fatal("nonempty_private_copy", err)
+	}
+	bootRecoveryData(t, binary, copy, false)
+	after, _ := os.ReadFile(source)
+	if !reflect.DeepEqual(contents, after) {
+		t.Fatal("original_candidate_changed")
+	}
+}
+
+func nonemptyBootSource(t *testing.T) string {
+	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
 	s, err := aosqlite.Open(dir)
@@ -217,7 +240,9 @@ func TestClosedNonemptyCandidateCopiesAndBootsWithoutNativeProvider(t *testing.T
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	s.UpsertProject(ctx, domain.ProjectRecord{ID: "closed", Path: "/unmounted/fixture-project", RegisteredAt: now})
+	if err = s.UpsertProject(ctx, domain.ProjectRecord{ID: "closed", Path: "/unmounted/fixture-project", RegisteredAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	rec, err := s.CreateSession(ctx, domain.SessionRecord{ID: "closed-1", ProjectID: "closed", Harness: domain.HarnessCodex, Mode: domain.SessionModeChat, Kind: domain.KindWorker, IsTerminated: true, CreatedAt: now, UpdatedAt: now})
 	if err != nil {
 		t.Fatal(err)
@@ -226,24 +251,37 @@ func TestClosedNonemptyCandidateCopiesAndBootsWithoutNativeProvider(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.ClaimChatControllerGeneration(ctx, rec.ID, "fixture-generation")
+	if err = s.ClaimChatControllerGeneration(ctx, rec.ID, "fixture-generation"); err != nil {
+		t.Fatal(err)
+	}
 	msg := domain.ConversationMessage{ID: "retained-original", ClientMessageID: "retained-client", Text: "synthetic", Origin: domain.MessageOriginHuman}
 	if created, err := s.AppendUserMessage(ctx, c.ID, rec.ID, "fixture-generation", msg, "retained-turn", now); err != nil || !created {
 		t.Fatal("nonempty_fixture_input", err)
 	}
-	s.Close()
-	data := rebuildRecoveryFixture(t, sealRecoveryFixture(t, dir))
-	source := filepath.Join(data, "ao.db")
-	contents, _ := os.ReadFile(source)
-	sum := sha256.Sum256(contents)
-	info, _ := os.Stat(source)
-	copy, err := copyClosedCandidate(source, hex.EncodeToString(sum[:]), t.TempDir(), candidateToken(info))
-	if err != nil || candidateMeta(t, copy) != 1 {
-		t.Fatal("nonempty_private_copy", err)
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
 	}
-	bootRecoveryData(t, binary, copy, false)
-	after, _ := os.ReadFile(source)
-	if !reflect.DeepEqual(contents, after) {
-		t.Fatal("original_candidate_changed")
+	return sealRecoveryFixture(t, dir)
+}
+
+func TestExportNonemptyBootSource(t *testing.T) {
+	if os.Getenv("AO_RECOVERY_FIXTURE_EXPORT") != "/out/sealed-nonempty.sqlite3" {
+		t.Skip("fixture_builder_only")
+	}
+	input, err := os.Open(nonemptyBootSource(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	output, err := os.OpenFile("/out/sealed-nonempty.sqlite3", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	if _, err = io.Copy(output, input); err != nil {
+		t.Fatal(err)
+	}
+	if err = output.Sync(); err != nil {
+		t.Fatal(err)
 	}
 }
