@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -225,4 +227,79 @@ func TestPageReclaimCharacterizationAutocheckpointConnectionLocal(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Logf("sqlite_version=%s autocheckpoint_original=%d other_connection=%d", version, own, other)
+}
+
+func TestPageReclaimCharacterizationWriterCloseAndDiscard(t *testing.T) {
+	for _, keepIdleReader := range []bool{false, true} {
+		for _, discard := range []bool{false, true} {
+			name := "last_connection"
+			if keepIdleReader {
+				name = "idle_readonly_keeper"
+			}
+			if discard {
+				name += "/discard"
+			} else {
+				name += "/close"
+			}
+			t.Run(name, func(t *testing.T) {
+				w, r, path := reclaimFixture(t)
+				if keepIdleReader {
+					// Finish the statement: no active read snapshot is held.
+					var n int
+					if err := r.QueryRow(`SELECT COUNT(*) FROM payloads`).Scan(&n); err != nil || n != 1 {
+						t.Fatal(n, err)
+					}
+				} else if err := r.Close(); err != nil {
+					t.Fatal(err)
+				}
+				connection, err := w.Conn(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				tx, err := connection.BeginTx(context.Background(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				drainSingleReclaim(t, context.Background(), tx)
+				if err = tx.Commit(); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if discard {
+					if err = connection.Raw(func(any) error { return driver.ErrBadConn }); !errors.Is(err, driver.ErrBadConn) {
+						t.Fatal("bad connection not discarded", err)
+					}
+					_ = connection.Close()
+				} else {
+					if err = connection.Close(); err != nil {
+						t.Fatal(err)
+					}
+					if err = w.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				after, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wal, walErr := os.Stat(path + "-wal")
+				walBytes := int64(0)
+				if walErr == nil {
+					walBytes = wal.Size()
+				} else if !os.IsNotExist(walErr) {
+					t.Fatal(walErr)
+				}
+				if keepIdleReader && (before.Size() != after.Size() || walErr != nil) {
+					t.Fatal("idle readonly connection did not prevent writer-close checkpoint", before.Size(), after.Size(), walErr)
+				}
+				if !keepIdleReader && after.Size() >= before.Size() {
+					t.Fatal("last close did not exercise expected implicit checkpoint", before.Size(), after.Size(), walBytes)
+				}
+				t.Logf("idle_keeper=%t discarded=%t main_bytes_delta=%d wal_present=%t wal_bytes=%d", keepIdleReader, discard, after.Size()-before.Size(), walErr == nil, walBytes)
+			})
+		}
+	}
 }
