@@ -92,6 +92,7 @@ func TestHistoryCopyFullApplicationPassAndProtection(t *testing.T) {
 			if string(before) != string(after) || r.SourceSHA256 != sha {
 				t.Fatal("source changed")
 			}
+			if !r.AllocationBefore.Available || !r.AllocationAfter.Available || len(r.AllocationBefore.Objects)==0 { t.Fatal("physical allocation evidence unavailable",r.AllocationBefore,r.AllocationAfter) }
 			if clean && (!r.Complete || len(r.Stages) != 11 || r.Status != "complete") {
 				t.Fatal(r)
 			}
@@ -270,4 +271,13 @@ func TestHistoryCopyCancellationNeverChangesSealedSource(t *testing.T) {
 	ctx,cancel:=context.WithCancel(context.Background());cancel()
 	r,err:=Run(ctx,o);if err==nil||r.Complete{t.Fatal("canceled run completed",r,err)}
 	after,err:=os.ReadFile(source);if err!=nil||string(before)!=string(after){t.Fatal("source changed on cancellation",err)}
+}
+
+func TestHistoryCopyAllocationAggregateMatchesPageCensus(t *testing.T) {
+	source,_:=fixture(t);db,err:=sql.Open("sqlite","file:"+source+"?mode=ro&immutable=1");if err!=nil{t.Fatal(err)};defer db.Close()
+	r,err:=CensusAllocation(context.Background(),db);if err!=nil||!r.Available{t.Fatal(r,err)}
+	for _,o:=range r.Objects { var pages,bytes,payload,unused int64
+		if err=db.QueryRow(`SELECT COUNT(*),SUM(pgsize),SUM(payload),SUM(unused) FROM dbstat WHERE name=?`,o.Name).Scan(&pages,&bytes,&payload,&unused);err!=nil{t.Fatal(err)}
+		if pages!=o.Pages||bytes!=o.AllocatedBytes||payload!=o.PayloadBytes||unused!=o.UnusedBytes{t.Fatal("aggregate report changed physical units",o)}
+	}
 }

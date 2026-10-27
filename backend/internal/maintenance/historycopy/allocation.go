@@ -27,7 +27,7 @@ type AllocationReport struct {
 // reusable freelist pages and OS file lengths are different reporting units.
 func CensusAllocation(ctx context.Context, db *sql.DB) (out AllocationReport, err error) {
 	out.Objects = []ObjectAllocation{}
-	rows, err := db.QueryContext(ctx, `SELECT d.name,COALESCE(s.tbl_name,d.name),COALESCE(s.type,'internal'),COUNT(*),COALESCE(SUM(d.pgsize),0),COALESCE(SUM(d.payload),0),COALESCE(SUM(d.unused),0) FROM dbstat d LEFT JOIN sqlite_schema s ON s.name=d.name GROUP BY d.name,s.tbl_name,s.type ORDER BY d.name`)
+	rows, err := db.QueryContext(ctx, `SELECT d.name,COALESCE(s.tbl_name,d.name),COALESCE(s.type,'internal'),d.pageno,d.pgsize,d.payload,d.unused FROM dbstat('main',1) d LEFT JOIN sqlite_schema s ON s.name=d.name ORDER BY d.name`)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table: dbstat") {
 			out.UnknownReason = "dbstat_unavailable"

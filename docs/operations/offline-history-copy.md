@@ -66,7 +66,7 @@ mapping. INTEGER PRIMARY KEY alias detection checks for a separate PK index
 Only type-tagged, JSON-framed key tuples enter SHA256; no row values are output.
 The cleaned identity census is the baseline for a later rebuild comparison.
 Census reads do not expand arbitrary body columns. Each physical census walks
-dbstat once, reporting per-table/index page allocation, payload and in-page
+[dbstat aggregate mode](https://www.sqlite.org/dbstat.html) once (one output row per B-tree, avoiding a multi-million-row external GROUP BY), reporting per-table/index page allocation, payload and in-page
 unused bytes. Missing dbstat is an explicit unknown. Freelist pages, DB/WAL file
 lengths and logical byte changes remain separate units.
 
