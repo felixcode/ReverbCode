@@ -165,6 +165,7 @@ func StartWithPageReclaim(path string, s *store.Store, o store.HistoryMaintenanc
 		cap["pid"] = os.Getpid()
 		cap["retentionHours"] = o.Retention.Hours()
  cap["rawCacheRetentionHours"] = o.RawCacheRetention.Hours()
+ cap["closedOwnerGC"] = s.ClosedOwnerMaintenanceConfigured()
 		cap["writeBudgetMS"] = o.WriteBudget.Milliseconds()
 		if reclaim == nil {
 			cap["pageReclaim"] = map[string]any{"configured": false, "supported": false, "reason": "invalid_reclaim_configuration"}

@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+ "sync/atomic"
 	"syscall"
 	"time"
 
@@ -565,7 +566,9 @@ func Run() error {
 	agentSvc = agentsvc.NewWithDeps(agentDeps)
 	agentSvc.WarmModelCatalogs(ctx)
 
-	persistentHostsReconciled := make(chan struct{})
+	var closedOwnerRecoveryReady atomic.Bool
+ store.SetClosedOwnerMaintenanceGuard(func(owner string)bool{return closedOwnerRecoveryReady.Load()&&chatSvc.ClosedOwnerMaintenanceInactive(domain.SessionID(owner))})
+ persistentHostsReconciled := make(chan struct{})
 	reviewerChatsRecovered := make(chan struct{})
 	sessionSvc, reviewSvc, wiredSessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, notificationWriter, agents, agentSvc, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc, persistentHostReconcileDone: persistentHostsReconciled}, reviewerChatsRecovered, settingsSvc, policyCoordinator, tracker, codexOperationGate, log)
 	if err != nil {
@@ -1028,17 +1031,21 @@ func Run() error {
 		startupReconcileDone = done
 		go func() {
 			defer close(done)
+            closedOwnerRecoveryKnown:=true
 			if reconcileErr := reconcilePersistentChatHosts(ctx, cfg.DataDir, store); reconcileErr != nil {
-				log.Error("persistent chat host reconciliation on boot failed", "err", reconcileErr)
+				closedOwnerRecoveryKnown=false
+                log.Error("persistent chat host reconciliation on boot failed", "err", reconcileErr)
 			}
 			close(persistentHostsReconciled)
 			// Reviewer-owned Chat controllers wait for persistent host reconciliation.
 			// Recover them only after the listener is ready and the gate is closed, or
 			// startup can deadlock before the daemon binds its port.
 			if reconcileErr := reviewSvc.RecoverChatReviewers(ctx); reconcileErr != nil {
-				log.Warn("reviewer chat recovery deferred", "err", reconcileErr)
+				closedOwnerRecoveryKnown=false
+                log.Warn("reviewer chat recovery deferred", "err", reconcileErr)
 			}
 			close(reviewerChatsRecovered)
+            if closedOwnerRecoveryKnown{closedOwnerRecoveryReady.Store(true)}
 			if reconcileErr := sessMgr.ReconcileBackground(ctx); reconcileErr != nil {
 				log.Error("background session reconciliation on boot failed", "err", reconcileErr)
 			}
