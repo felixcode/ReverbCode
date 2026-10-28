@@ -15,7 +15,7 @@ func historyGCMetadata(ctx context.Context,db maintenanceDB,id any)(maintenanceR
  var conversation,received,handle,method string
  err:=db.QueryRowContext(ctx,`SELECT conversation_id,CAST(received_at AS TEXT),provider_event_id,method FROM conversation_provider_events WHERE id=?`,id).Scan(&conversation,&received,&handle,&method)
  if errors.Is(err,sql.ErrNoRows){return nil,nil};if err!=nil{return nil,err}
- return maintenanceRow{"conversation_id":conversation,"received_at":received,"provider_event_id":handle,"method":method},nil
+ return maintenanceRow{"id":id,"conversation_id":conversation,"received_at":received,"provider_event_id":handle,"method":method},nil
 }
 func prepareHistoryGC(ctx context.Context,db maintenanceDB,ids []any)([]maintenancePrepared,error){
  plans:=make([]maintenancePrepared,0,len(ids))
@@ -27,6 +27,7 @@ func applyHistoryGC(ctx context.Context,tx *sql.Tx,p maintenancePrepared,cutoff 
  if !reflect.DeepEqual(row,p.row){result.Retained["concurrent_body_or_owner_change"]++;return false,nil}
  if row.text("provider_event_id")!=""{result.Retained["native_event_identity"]++;return true,nil}
  if !historyGCStreamMethod(row.text("method")){result.Retained["control_event"]++;return true,nil}
+ if reason:=historyBodyCoverageReason(ctx,row,"gc:raw");reason!=""{result.Retained[reason]++;return true,nil}
  reason,e:=historyGCEligible(ctx,tx,historyGCRow{conversation:row.text("conversation_id"),received:row.text("received_at")},HistoryGCOptions{Cutoff:cutoff},map[string]historyGCProtection{})
  if e!=nil{return false,e};if reason!=""{result.Retained[reason]++;return true,nil}
  // Both deletes are part of the existing maintenance transaction. This emits

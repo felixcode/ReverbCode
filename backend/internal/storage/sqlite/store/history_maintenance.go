@@ -18,6 +18,8 @@ import (
 // HistoryMaintenanceRequest contains no SQL, predicates, replacement values or
 // original content. The daemon alone selects policy, bodies and transformations.
 type HistoryMaintenanceRequest struct {
+ OfflineCoverageBefore time.Time `json:"-"`
+ OfflineMaxEventID int64 `json:"-"`
 	Stage          string `json:"stage"`
 	Cursor         string `json:"cursor"`
 	Cutoff         string `json:"cutoff"`
@@ -160,6 +162,7 @@ func (s *Store) MaintainHistorySnapshotBatch(ctx context.Context, req HistoryMai
 	if asOf.IsZero() || asOf.After(time.Now().UTC()) {
 		return HistoryMaintenanceResult{Status: "failed", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}, errors.New("invalid historical snapshot clock")
 	}
+	if !req.OfflineCoverageBefore.IsZero(){if req.OfflineMaxEventID<=0||req.OfflineCoverageBefore.After(asOf){return HistoryMaintenanceResult{},errors.New("invalid offline recovery coverage")};ctx=context.WithValue(ctx,historyBodyCoverageKey{},historyBodyCoverage{req.OfflineCoverageBefore,req.OfflineMaxEventID})}
 	return s.maintainHistoryBatchAt(ctx, req, o, asOf.UTC(), true)
 }
 
