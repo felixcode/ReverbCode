@@ -63,6 +63,7 @@ type HistoryMaintenanceResult struct {
 	Scanned                 int            `json:"scanned"`
 	Compacted               int            `json:"compacted"`
 	Deleted                 int            `json:"deleted"`
+	AuditDeleted            int            `json:"audit_deleted"`
 	Audited                 int            `json:"audited"`
 	Markers                 int64          `json:"markers"`
 	LogicalBytes            int64          `json:"logical_bytes_delta"`
@@ -80,6 +81,7 @@ type maintenanceStage struct {
 }
 
 var maintenanceStages = map[string]maintenanceStage{
+	"gc:raw":                                {"conversation_provider_events", "provider_event", nil, false},
 	"raw":                                   {"conversation_provider_events", "provider_event", []string{"payload_json"}, false},
 	"outputs":                               {"conversation_activities", "activity_output", []string{"command_output", "streamed_text"}, false},
 	"message":                               {"conversation_messages", "message", []string{"text", "delivery_content_json"}, false},
@@ -181,6 +183,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			result.Committed = false
 			result.Compacted = 0
 			result.Deleted = 0
+			result.AuditDeleted = 0
 			result.Audited = 0
 			result.Markers = 0
 			result.LogicalBytes = 0
@@ -219,7 +222,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	if err != nil {
 		return result, err
 	}
-	if cutoff.After(now.Add(-o.Retention)) {
+	if cutoff.After(now.Add(-o.Retention)) || req.Stage == "gc:raw" && cutoff.After(now.Add(-48*time.Hour)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
 	// Separate, non-queued admission bounds all reader/CPU preparation memory.

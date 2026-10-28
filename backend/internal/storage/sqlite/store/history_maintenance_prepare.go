@@ -111,6 +111,7 @@ func maintenanceBuiltinOriginal(ctx context.Context, db maintenanceDB, stage mai
 	return row, nil
 }
 func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage maintenanceStage, stageName, key string, ids []any, o HistoryMaintenanceOptions, now, cutoff time.Time, rawNoBodyFastPath ...bool) ([]maintenancePrepared, error) {
+	if stageName == "gc:raw" { return prepareHistoryGC(ctx, db, ids) }
 	columns := stage.fields
 	var err error
 	if stage.builtin {
@@ -298,6 +299,7 @@ func applyMaintenancePrepared(ctx context.Context, tx *sql.Tx, stage maintenance
 }
 
 func applyMaintenancePreparedWithEligibility(ctx context.Context, tx *sql.Tx, eligibility maintenanceDB, stage maintenanceStage, stageName, key string, p maintenancePrepared, cutoff, now time.Time, result *HistoryMaintenanceResult) (advanced bool, err error) {
+	if stageName == "gc:raw" { return applyHistoryGC(ctx, tx, p, cutoff, result) }
 	if p.skip != "" {
 		if p.skip == "already_expired" {
 			marked, e := maintenanceExists(ctx, tx, `SELECT 1 FROM ao_history_retention WHERE object_kind=? AND object_id=?`, stage.kind, maintenanceID(p.id))

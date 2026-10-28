@@ -38,3 +38,10 @@ func TestHistoryGCUnknownBoundaryIsScopedAndRecentCutoffRejected(t *testing.T){
 	o:=HistoryGCOptions{Cutoff:now.Add(-48*time.Hour),MaxEventID:10,BatchRows:10,Apply:true};r,e:=s.PruneAnonymousHistoryBatch(context.Background(),0,o);if e!=nil||r.Deleted!=1||r.Retained["unknown_pending_boundary"]!=1{t.Fatalf("wrong scope %+v %v",r,e)}
 	o.Cutoff=now.Add(-time.Hour);if _,e=s.PruneAnonymousHistoryBatch(context.Background(),0,o);e==nil{t.Fatal("recent cutoff accepted")}
 }
+
+func TestHistoryGCAdditionalProjectedAnonymousMethods(t *testing.T){
+ s,db,now:=gcFixture(t);old:=now.Add(-72*time.Hour).Format(time.RFC3339Nano)
+ for i,m:=range []string{"activity.started","activity.completed","usage","account.rateLimits"}{gcInsert(t,db,i+1,"c","",m,old);gcInsert(t,db,i+101,"c","native",m,old)}
+ r,e:=s.PruneAnonymousHistoryBatch(context.Background(),0,HistoryGCOptions{Cutoff:now.Add(-48*time.Hour),BatchRows:1000,Apply:true});if e!=nil||r.Deleted!=4{t.Fatalf("additional projected methods %+v %v",r,e)}
+ var n int;db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE provider_event_id<>''`).Scan(&n);if n!=4{t.Fatal("native identity removed")}
+}

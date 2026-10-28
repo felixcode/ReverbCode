@@ -31,7 +31,7 @@ type HistoryGCResult struct {
 	Committed bool `json:"transaction_committed"`
 }
 
-const historyGCStreams = `('message.delta','reasoning.delta','command.output.delta','activity.text')`
+const historyGCStreams = `('message.delta','reasoning.delta','command.output.delta','activity.text','activity.started','activity.completed','usage','account.rateLimits')`
 
 type historyGCRow struct { id int64; conversation, received string }
 type historyGCProtection struct { at time.Time; unknown bool }
@@ -84,17 +84,7 @@ func (s *Store) PruneAnonymousHistoryBatch(ctx context.Context, cursor int64, o 
 	protection:=map[string]historyGCProtection{}; var ids []any; var textIDs []any
 	for _,v:=range items {
 		r.Scanned++;r.NextCursor=v.id
-		stamp,e:=maintenanceTime(v.received);if e!=nil { r.Retained["invalid_timestamp"]++;continue }
-		if stamp.After(o.Cutoff) { r.Retained["within_48h"]++;continue }
-		p,ok:=protection[v.conversation];if !ok { p,err=historyGCProtected(ctx,tx,v.conversation);if err!=nil { return r,err };protection[v.conversation]=p }
-		if p.unknown { r.Retained["unknown_pending_boundary"]++;continue }
-		if !p.at.IsZero() && !stamp.Before(p.at) { r.Retained["unresolved_tail"]++;continue }
-		if !o.CoverageBefore.IsZero() {
-			var at string
-			e=tx.QueryRowContext(ctx,`SELECT expired_at FROM ao_history_retention WHERE object_kind='provider_event' AND object_id=?`,strconv.FormatInt(v.id,10)).Scan(&at)
-			if e!=nil && !errors.Is(e,sql.ErrNoRows) { return r,e }
-			if e==nil { t,x:=maintenanceTime(at);if x!=nil || t.After(o.CoverageBefore) { r.Retained["audit_outside_backup"]++;continue } }
-		}
+		reason,e:=historyGCEligible(ctx,tx,v,o,protection);if e!=nil{return r,e};if reason!="" {r.Retained[reason]++;continue}
 		ids=append(ids,v.id);textIDs=append(textIDs,strconv.FormatInt(v.id,10));r.Eligible++
 	}
 	if !o.Apply || len(ids)==0 { return r,nil }
@@ -106,4 +96,19 @@ func (s *Store) PruneAnonymousHistoryBatch(ctx context.Context, cursor int64, o 
 	if deleted!=int64(len(ids)) { return r,errors.New("gc_candidates_changed") }
 	if err=tx.Commit();err!=nil { return r,err }
 	r.Deleted=deleted;r.AuditDeleted=auditDeleted;r.Committed=true;return r,nil
+}
+
+// The offline and routine paths share this policy; routine transactions always
+// compute current protection again after non-queued writer admission.
+func historyGCEligible(ctx context.Context, db maintenanceDB, v historyGCRow, o HistoryGCOptions, protection map[string]historyGCProtection)(string,error){
+ stamp,e:=maintenanceTime(v.received);if e!=nil{return "invalid_timestamp",nil}
+ if stamp.After(o.Cutoff){return "within_48h",nil}
+ p,ok:=protection[v.conversation];if !ok{p,e=historyGCProtected(ctx,db,v.conversation);if e!=nil{return "",e};protection[v.conversation]=p}
+ if p.unknown{return "unknown_pending_boundary",nil};if !p.at.IsZero()&&!stamp.Before(p.at){return "unresolved_tail",nil}
+ if !o.CoverageBefore.IsZero(){var at string;e=db.QueryRowContext(ctx,`SELECT expired_at FROM ao_history_retention WHERE object_kind='provider_event' AND object_id=?`,strconv.FormatInt(v.id,10)).Scan(&at);if e!=nil&&!errors.Is(e,sql.ErrNoRows){return "",e};if e==nil{t,x:=maintenanceTime(at);if x!=nil||t.After(o.CoverageBefore){return "audit_outside_backup",nil}}}
+ return "",nil
+}
+
+func historyGCStreamMethod(method string) bool {
+ switch method {case "message.delta","reasoning.delta","command.output.delta","activity.text","activity.started","activity.completed","usage","account.rateLimits":return true};return false
 }
