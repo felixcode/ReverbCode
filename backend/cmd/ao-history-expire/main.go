@@ -35,7 +35,7 @@ func run()int{
 	for{
 		bc,done:=context.WithTimeout(ctx,batch);r,x:=s.PruneAnonymousHistoryBatch(bc,cursor,store.HistoryGCOptions{Cutoff:cutoff,CoverageBefore:freeze,MaxEventID:maxID,BatchRows:rows,Apply:apply});done()
 		if x!=nil{state["status"]="failed";state["error"]="gc_batch_failed_commit_may_be_unknown";save();return fail("gc_batch_failed")}
-		cursor=r.NextCursor;totalScanned+=int64(r.Scanned);totalEligible+=int64(r.Eligible);state["eligible"]=totalEligible;totalDeleted+=r.Deleted;totalAudits+=r.AuditDeleted;batches++
+		state["scan_complete"]=r.Complete;cursor=r.NextCursor;totalScanned+=int64(r.Scanned);totalEligible+=int64(r.Eligible);state["eligible"]=totalEligible;totalDeleted+=r.Deleted;totalAudits+=r.AuditDeleted;batches++
 		for k,v:=range r.Retained{retained[k]+=v};state["scanned"]=totalScanned;state["deleted"]=totalDeleted;state["audit_deleted"]=totalAudits;state["retained"]=retained;state["confirmed_cursor"]=cursor;state["remaining_upper_id_span"]=maxID-cursor
 		if e=save();e!=nil{return fail("report_write_failed")}
 		if apply && (batches%checkpointEvery==0 || r.Complete){cc,done:=context.WithTimeout(ctx,30*time.Second);_,_,_,x=s.CheckpointHistoryGC(cc);done();if x!=nil{state["status"]="failed";state["error"]="checkpoint_failed";save();return fail("checkpoint_failed")}}
