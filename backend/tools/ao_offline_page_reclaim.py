@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -47,8 +48,10 @@ def reclaim_batch(connection,count,budget,cancelled=None):
     connection.set_progress_handler(lambda:int(time.monotonic()>=deadline or cancelled is not None and cancelled.is_set()),1000)
     commit_state='not_started';started=time.monotonic()
     try:
+        if time.monotonic()>=deadline or cancelled is not None and cancelled.is_set():raise TimeoutError('cancelled_or_deadline')
         connection.execute('BEGIN IMMEDIATE');commit_state='open'
         connection.execute('PRAGMA incremental_vacuum('+str(min(count,before['free_pages']))+')').fetchall()
+        if time.monotonic()>=deadline or cancelled is not None and cancelled.is_set():raise TimeoutError('cancelled_or_deadline')
         after=pages(connection)
         if after['free_pages']>before['free_pages'] or before['free_pages']-after['free_pages']>count or after['page_count']>before['page_count']:
             raise ValueError('invalid_page_delta')
@@ -62,6 +65,7 @@ def reclaim_batch(connection,count,budget,cancelled=None):
                 if commit_state=="open":commit_state="rolled_back"
             except sqlite3.Error:commit_state="unknown"
         error.ao_commit_state=commit_state
+        error.ao_error_enum="context_canceled" if cancelled is not None and cancelled.is_set() else "deadline_exceeded" if isinstance(error,TimeoutError) or time.monotonic()>=deadline else "sqlite_error"
         raise
     finally:connection.set_progress_handler(None,0)
 
@@ -87,9 +91,9 @@ def run():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--database',type=Path,required=True);p.add_argument('--database-device',type=int,required=True);p.add_argument('--database-inode',type=int,required=True)
     p.add_argument('--maintenance-lock',type=Path,required=True);p.add_argument('--report',type=Path,required=True)
-    p.add_argument('--inspect-only',action='store_true');p.add_argument('--batch-pages',type=int,default=4096);p.add_argument('--batch-seconds',type=float,default=30);p.add_argument('--wall-seconds',type=float,default=3600);p.add_argument('--cache-mib',type=int,default=128)
+    p.add_argument('--max-batches',type=int,default=0);p.add_argument('--inspect-only',action='store_true');p.add_argument('--batch-pages',type=int,default=4096);p.add_argument('--batch-seconds',type=float,default=30);p.add_argument('--wall-seconds',type=float,default=3600);p.add_argument('--cache-mib',type=int,default=128)
     a=p.parse_args();os.umask(0o077)
-    if not a.database.is_absolute() or min(a.batch_pages,a.batch_seconds,a.wall_seconds,a.cache_mib)<=0 or a.cache_mib>1024:raise ValueError('invalid_options')
+    if not a.database.is_absolute() or min(a.batch_pages,a.batch_seconds,a.wall_seconds,a.cache_mib)<=0 or a.cache_mib>1024 or a.max_batches<0 or not all(math.isfinite(v) for v in (a.batch_seconds,a.wall_seconds)):raise ValueError('invalid_options')
     parent=a.report.parent.lstat()
     if not stat.S_ISDIR(parent.st_mode) or parent.st_uid!=os.getuid() or stat.S_IMODE(parent.st_mode)!=0o700 or a.report.parent.is_symlink():raise ValueError('unsafe_report_parent')
     before=identity(a.database)
@@ -131,9 +135,11 @@ def run():
                     save(a.report,result)
                     phase='native_reclaim'
                     if last['free_pages_removed']==0:raise ValueError('no_reclaim_progress')
+                    if a.max_batches and result['committed_batches']>=a.max_batches:
+                        result['status']='partial';break
                 if result['status']=='running':result['status']='preview_complete' if a.inspect_only else 'complete'
             except BaseException as error:
-                result['status']='failed';result['failed_phase']=phase;result['failed_batch_commit_state']='committed' if phase=='native_checkpoint' else getattr(error,'ao_commit_state','unknown');result['error_type']='interrupted' if isinstance(error,sqlite3.OperationalError) and getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_INTERRUPT else 'sqlite_error' if isinstance(error,sqlite3.Error) else 'guard_or_io_error'
+                result['status']='failed';result['failed_phase']=phase;result['failed_batch_commit_state']='committed' if phase=='native_checkpoint' else getattr(error,'ao_commit_state','unknown');result['error_type']=getattr(error,'ao_error_enum',None) or ('interrupted' if isinstance(error,sqlite3.OperationalError) and getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_INTERRUPT else 'sqlite_error' if isinstance(error,sqlite3.Error) else 'guard_or_io_error')
                 if isinstance(error,sqlite3.Error):result['sqlite_code']=getattr(error,'sqlite_errorcode',None)
                 save(a.report,result);raise
             result['final_pages']=pages(connection);result['main_file_bytes']=a.database.stat().st_size;save(a.report,result)
