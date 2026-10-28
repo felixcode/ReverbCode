@@ -72,7 +72,7 @@ func TestClosedOwnerGCOnlineGuardRechecksWriterWithoutOfflineCoverage(t *testing
 }
 
 func TestClosedOwnerGCReviewLifecycleDoesNotMakeSessionPermanentlyPending(t *testing.T){
- for _,test:=range []struct{name,post,usage string;reviewDeleted bool}{{"posted","github-123","",true},{"unposted","","",false},{"usage_pending","github-123","finalizing",false}}{t.Run(test.name,func(t *testing.T){
+ for _,test:=range []struct{name,post,usage string;reviewDeleted bool}{{"posted","github-123","",true},{"unposted","","",false},{"usage_pending","github-123","finalizing",true}}{t.Run(test.name,func(t *testing.T){
   f:=closedOwnerSeed(t);ctx:=context.Background();review:=domain.Review{ID:"closed-review",SessionID:domain.SessionID(f.owner),ProjectID:"closed-owner",Harness:domain.ReviewerCodex,ReviewerActivityState:domain.ActivityActive,CreatedAt:histClock,UpdatedAt:histClock}
   if e:=f.s.UpsertReview(ctx,review);e!=nil{t.Fatal(e)}
   conv,e:=f.s.CreateReviewConversation(ctx,"old-review-conv",review.ID,"closed-owner",domain.SessionID(f.owner),histClock);if e!=nil{t.Fatal(e)}
@@ -85,6 +85,7 @@ func TestClosedOwnerGCReviewLifecycleDoesNotMakeSessionPermanentlyPending(t *tes
   r,e:=f.s.MaintainHistorySnapshotBatch(ctx,req,o,f.now);if e!=nil{t.Fatalf("strict review %+v %v",r,e)}
   var n int;f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=1`).Scan(&n);if (n==0)!=test.reviewDeleted{t.Fatal("session did not use actual terminal review proof")}
   f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=8`).Scan(&n);if (n==0)!=test.reviewDeleted{t.Fatalf("review proof wrong n%d result%+v",n,r)}
+  if test.usage!=""{var state string;if e=f.db.QueryRow(`SELECT state FROM usage_bindings WHERE session_id=?`,f.owner).Scan(&state);e!=nil||state!="finalizing"{t.Fatal("billing binding changed by history GC")}}
  })}
 }
 

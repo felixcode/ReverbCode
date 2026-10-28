@@ -30,7 +30,7 @@ func closedHistorySessionProof(ctx context.Context,db maintenanceDB,owner string
  e:=db.QueryRowContext(ctx,`SELECT is_terminated,is_pinned,conversation_checkpoint_unsettled FROM sessions WHERE id=?`,owner).Scan(&terminated,&pinned,&unsettled)
  if errors.Is(e,sql.ErrNoRows){return keep("closed_owner_missing")};if e!=nil{return closedHistoryProof{},e}
  if terminated!=1||pinned!=0||unsettled!=0{return keep("closed_owner_current_or_checkpoint")}
- pendingUsage,e:=maintenanceExists(ctx,db,`SELECT 1 FROM usage_bindings WHERE session_id=? AND state NOT IN ('complete','partial') LIMIT 1`,owner);if e!=nil{return closedHistoryProof{},e};if pendingUsage{return keep("closed_owner_native_usage_pending")}
+
  // Review existence is not activity. Require its own terminal/post proof,
  // without recursing through closedHistoryOwner or the old scope-only helper.
  reviewRows,e:=db.QueryContext(ctx,`SELECT id FROM review WHERE session_id=?`,owner);if e!=nil{return closedHistoryProof{},e}
@@ -53,8 +53,8 @@ func closedHistorySessionProof(ctx context.Context,db maintenanceDB,owner string
 func closedHistoryReviewProof(ctx context.Context,db maintenanceDB,id string)(closedHistoryProof,error){
  var owner string;e:=db.QueryRowContext(ctx,`SELECT session_id FROM review WHERE id=?`,id).Scan(&owner)
  if errors.Is(e,sql.ErrNoRows){return closedHistoryProof{false,"closed_review_missing"},nil};if e!=nil{return closedHistoryProof{},e}
- for _,q:=range []string{`SELECT 1 FROM pr WHERE session_id=? AND is_merged=0 AND is_closed=0 LIMIT 1`,`SELECT 1 FROM usage_bindings WHERE session_id=? AND state NOT IN ('complete','partial') LIMIT 1`}{
-  yes,e:=maintenanceExists(ctx,db,q,owner);if e!=nil{return closedHistoryProof{},e};if yes{return closedHistoryProof{false,"closed_review_open_pr_or_native_usage"},nil}
+ for _,q:=range []string{`SELECT 1 FROM pr WHERE session_id=? AND is_merged=0 AND is_closed=0 LIMIT 1`}{
+  yes,e:=maintenanceExists(ctx,db,q,owner);if e!=nil{return closedHistoryProof{},e};if yes{return closedHistoryProof{false,"closed_review_open_pr"},nil}
  }
  rows,e:=db.QueryContext(ctx,`SELECT status,COALESCE(verdict,''),COALESCE(github_review_id,'') FROM review_run WHERE review_id=?`,id);if e!=nil{return closedHistoryProof{},e};defer rows.Close();count:=0
  for rows.Next(){var state,verdict,post string;if e=rows.Scan(&state,&verdict,&post);e!=nil{return closedHistoryProof{},e};count++
