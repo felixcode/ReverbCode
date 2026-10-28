@@ -32,6 +32,7 @@ type HistoryMaintenanceRequest struct {
 type HistoryMaintenanceOptions struct {
 	Retention   time.Duration
 	BatchRows   int
+	GCBatchRows int
 	BatchBytes  int64
 	MaxRowBytes int64
 	ReadBudget  time.Duration
@@ -39,10 +40,10 @@ type HistoryMaintenanceOptions struct {
 }
 
 func DefaultHistoryMaintenanceOptions() HistoryMaintenanceOptions {
-	return HistoryMaintenanceOptions{47 * time.Hour, 100, 16 << 20, 8 << 20, 2 * time.Second, 250 * time.Millisecond}
+	return HistoryMaintenanceOptions{Retention: 47 * time.Hour, BatchRows: 100, GCBatchRows: 250, BatchBytes: 16 << 20, MaxRowBytes: 8 << 20, ReadBudget: 2 * time.Second, WriteBudget: 250 * time.Millisecond}
 }
 func (o HistoryMaintenanceOptions) Validate() error {
-	if o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
+	if o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.GCBatchRows <= 0 || o.GCBatchRows > 1000 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
 		return errors.New("invalid maintenance settings")
 	}
 	return nil
@@ -197,6 +198,10 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	}
 	if req.BatchRows < 0 || req.BatchBytes < 0 || req.MaxRowBytes < 0 || req.ReadBudgetNS < 0 || req.WriteBudgetNS < 0 {
 		return result, errors.New("invalid request limits")
+	}
+	// GC reads/rechecks metadata only; its independent cap never enlarges body batches.
+	if req.Stage == "gc:raw" {
+		o.BatchRows = o.GCBatchRows
 	}
 	if req.BatchRows > 0 {
 		o.BatchRows = min(o.BatchRows, req.BatchRows)

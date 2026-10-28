@@ -274,6 +274,11 @@ func StartConfigured(s *store.Store) (*Server, error) {
 		}
 		o.BatchRows = n
 	}
+	if raw := os.Getenv("ALBANIA_AO_HISTORY_GC_BATCH_ROWS"); raw != "" {
+		n, e := strconv.Atoi(raw)
+		if e != nil || n < 1 || n > 1000 { return nil, errors.New("invalid GC maintenance rows") }
+		o.GCBatchRows = n
+	}
 	reclaim, reclaimErr := configuredPageReclaimOptions(o)
 	if reclaimErr != nil {
 		return StartWithPageReclaim(path, s, o, nil)
