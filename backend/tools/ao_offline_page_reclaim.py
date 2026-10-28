@@ -105,7 +105,9 @@ def full_reclaim_once(connection):
     finally:
         # Restoring 2 is a distinct durable transaction, including after a
         # failed/rolled-back FULL attempt; in-memory flags alone are insufficient.
-        restore_incremental(connection)
+        try:restore_incremental(connection)
+        except BaseException as error:
+            error.ao_commit_state=state;error.ao_phase="restore_incremental";raise
 
 
 def stopped():
