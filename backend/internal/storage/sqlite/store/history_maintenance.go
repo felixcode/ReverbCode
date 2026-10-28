@@ -54,6 +54,7 @@ func (o HistoryMaintenanceOptions) Validate() error {
 
 type HistoryMaintenanceResult struct {
  rawCacheSchemaChecked bool
+ rawCacheProtection map[string]historyGCProtection
 	Phase                   string         `json:"phase,omitempty"`
 	CommitState             string         `json:"commit_state"`
 	WriterReservedMS        float64        `json:"writer_reserved_ms"`
