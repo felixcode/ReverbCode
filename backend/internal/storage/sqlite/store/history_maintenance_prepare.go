@@ -17,6 +17,7 @@ type maintenanceRawProof struct {
 	native       string
 	hasBody      bool
 	hasRetention bool
+ bodyOnlyMarkers bool
 }
 type maintenanceAudit struct {
 	kind, id, conversation, semantic, prompt, originalSHA, at, cutoff, fields string
@@ -35,6 +36,7 @@ type maintenancePrepared struct {
 	audits        []maintenanceAudit
 	inlineExpired bool
 	noRawBody     bool
+ bodyNoChange bool
 	size          int64
 }
 
@@ -47,11 +49,12 @@ func prepareMaintenanceRaw(ctx context.Context, row maintenanceRow) (*maintenanc
 	if !ok {
 		return nil, maintenanceRetained("raw_not_object")
 	}
-	proof := &maintenanceRawProof{}
+	proof := &maintenanceRawProof{bodyOnlyMarkers:true}
 	_, proof.hasRetention = obj["_retention"]
 	proof.native, _ = obj["providerTurnId"].(string)
 	for _, key := range maintenanceBodyKeys {
 		proof.hasBody = proof.hasBody || maintenanceTruthy(obj[key])
+        if maintenanceTruthy(obj[key])&&!historyBodyValueMarker(obj[key]){proof.bodyOnlyMarkers=false}
 	}
 	return proof, nil
 }
@@ -212,11 +215,13 @@ func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage mainten
 		// A well-formed raw object with no body has nothing to expire. Do not
 		// repeat owner/turn eligibility and transformation for metadata events.
 		// The writer still rechecks metadata + exact body CAS before advancing.
-		if len(rawNoBodyFastPath) > 0 && rawNoBodyFastPath[0] && stageName == "raw" && err == nil && !p.proof.hasBody && !p.proof.hasRetention {
+		if len(rawNoBodyFastPath) > 0 && rawNoBodyFastPath[0] && stageName == "raw" && err == nil && p.proof.bodyOnlyMarkers {
 			p.noRawBody = true
 			plans = append(plans, p)
 			continue
 		}
+		if err==nil && historyBodyAlreadyEmpty(p.row,stageName){p.bodyNoChange=true;plans=append(plans,p);continue}
+        if err==nil {if reason:=historyBodyCoverageReason(ctx,p.row,stageName);reason!=""{p.skip=reason;plans=append(plans,p);continue}}
 		if err == nil {
 			var eligible bool
 			eligible, err = maintenanceEligibleWithProof(ctx, db, p.row, stageName, cutoff, p.proof)
@@ -356,6 +361,8 @@ func applyMaintenancePreparedWithEligibility(ctx context.Context, tx *sql.Tx, el
 			result.Retained["concurrent_body_or_owner_change"]++
 			return false, nil
 		}
+		if p.bodyNoChange{result.Retained["body_already_empty_or_marker"]++;return true,nil}
+        if reason:=historyBodyCoverageReason(ctx,current,stageName);reason!=""{result.Retained[reason]++;return true,nil}
 		if p.inlineExpired {
 			result.Retained["already_expired"]++
 			return true, nil

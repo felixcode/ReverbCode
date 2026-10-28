@@ -64,10 +64,10 @@ func maintenanceColumns(table, stage string, body bool) (string, error) {
 		meta = "id,conversation_id,session_id,provider_event_id,method,CAST(received_at AS TEXT) AS received_at"
 		fields = []string{"payload_json"}
 	case "conversation_messages":
-		meta = "id,conversation_id,turn_id,role,streaming,revision,branch_id,provider_item_id,client_message_id,client_payload_hash,CAST(created_at AS TEXT) AS created_at"
+		meta = "id,conversation_id,turn_id,role,streaming,revision,branch_id,provider_item_id,client_message_id,client_payload_hash,CAST(created_at AS TEXT) AS created_at,CAST(updated_at AS TEXT) AS updated_at"
 		fields = []string{"text", "delivery_content_json"}
 	case "conversation_activities":
-		meta = "id,conversation_id,turn_id,status,revision,branch_id,provider_item_id,request_id,command_output_truncated,streamed_text_truncated,CAST(created_at AS TEXT) AS created_at"
+		meta = "id,conversation_id,turn_id,status,revision,branch_id,provider_item_id,request_id,command_output_truncated,streamed_text_truncated,CAST(created_at AS TEXT) AS created_at,CAST(updated_at AS TEXT) AS updated_at"
 		fields = []string{"command_output", "streamed_text"}
 		if stage != "outputs" {
 			meta += ",kind"
@@ -326,6 +326,11 @@ func maintenanceEligibleWithProof(ctx context.Context, db maintenanceDB, row mai
 		native := proof.native
 		if native == "" {
 			if proof.hasBody {
+                if historyRawBodyCanExpire(row.text("method")) {
+                    safeCutoff:=cutoff;oldest:=time.Now().UTC().Add(-48*time.Hour);if safeCutoff.After(oldest){safeCutoff=oldest}
+                    reason,e:=historyGCEligible(ctx,db,historyGCRow{conversation:row.text("conversation_id"),received:row.text("received_at")},HistoryGCOptions{Cutoff:safeCutoff},map[string]historyGCProtection{})
+                    if e!=nil{return false,e};if reason!=""{return false,maintenanceRetained(reason)};return true,nil
+                }
 				return false, maintenanceRetained("raw_turn_unattributed")
 			}
 			return true, nil
