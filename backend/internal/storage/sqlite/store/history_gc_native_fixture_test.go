@@ -1,11 +1,14 @@
 package store_test
-import("context";"database/sql";"encoding/json";"os";"path/filepath";"testing";"time";"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite")
+import("context";"database/sql";"encoding/json";"os";"path/filepath";"testing";"time";"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite";"github.com/aoagents/agent-orchestrator/backend/internal/domain")
 // Test-only export of a tiny Go-created full AO schema192 database for native
 // engine format compatibility. Never opens a production path or copies a DB.
 func TestHistoryGCNativeFixtureExport(t *testing.T){
  dir:=os.Getenv("AO_NATIVE_RECLAIM_FIXTURE_OUT");if dir==""{t.Skip("test-only fixture output not requested")};if e:=os.Mkdir(dir,0700);e!=nil{t.Fatal(e)};path:=filepath.Join(dir,"ao.db")
- w,e:=sql.Open("sqlite",path+"?_pragma=auto_vacuum(2)");if e!=nil{t.Fatal(e)};if _,e=w.Exec(`CREATE TABLE native_reclaim_fixture(id INTEGER PRIMARY KEY,body BLOB)`);e!=nil{t.Fatal(e)};w.Close()
- s,e:=sqlite.Open(dir);if e!=nil{t.Fatal(e)};w,e=sql.Open("sqlite",path);if e!=nil{t.Fatal(e)}
+ w,e:=sql.Open("sqlite",path+"?_pragma=auto_vacuum(2)");if e!=nil{t.Fatal(e)};if _,e=w.Exec(`CREATE TABLE native_reclaim_fixture(id INTEGER PRIMARY KEY,body BLOB);CREATE TABLE native_reclaim_rowid_fixture(id TEXT UNIQUE,body TEXT);INSERT INTO native_reclaim_rowid_fixture VALUES('implicit-1','KEEP-LATEST'),('implicit-2','KEEP-PENDING')`);e!=nil{t.Fatal(e)};w.Close()
+ s,e:=sqlite.Open(dir);if e!=nil{t.Fatal(e)};
+ ctx:=context.Background();seedProject(t,s,"native-pending");rec:=sampleRecord("native-pending");rec.Mode=domain.SessionModeChat;session,e:=s.CreateSession(ctx,rec);if e!=nil{t.Fatal(e)};conv,e:=s.CreateConversation(ctx,"native-pending-conv",domain.ConversationScopeSession,"native-pending",session.ID,histClock);if e!=nil{t.Fatal(e)};if e=s.ClaimChatControllerGeneration(ctx,session.ID,"native-pending-gen");e!=nil{t.Fatal(e)}
+ if _,e=s.AppendUserMessage(ctx,conv.ID,session.ID,"native-pending-gen",domain.ConversationMessage{ID:"native-latest-input",Text:"KEEP-LATEST",Origin:domain.MessageOriginHuman,ClientMessageID:"native-latest-client"},"native-pending-turn",histClock);e!=nil{t.Fatal(e)};if e=s.BindTurnToProvider(ctx,"native-pending-turn","native-current-provider",histClock);e!=nil{t.Fatal(e)};if e=s.UpsertActivity(ctx,conv.ID,"native-current-provider",domain.ConversationActivity{ID:"native-pending-question",Kind:domain.ActivityKindUserInput,Status:domain.ActivityStatusPending,RequestID:"native-pending-request",Summary:"KEEP-PENDING"},histClock);e!=nil{t.Fatal(e)}
+w,e=sql.Open("sqlite",path);if e!=nil{t.Fatal(e)}
  tx,e:=w.Begin();if e!=nil{t.Fatal(e)};for i:=0;i<128;i++{if _,e=tx.Exec(`INSERT INTO native_reclaim_fixture VALUES(?,zeroblob(8192))`,i);e!=nil{t.Fatal(e)}};if e=tx.Commit();e!=nil{t.Fatal(e)};if _,e=w.Exec(`DELETE FROM native_reclaim_fixture WHERE id<127`);e!=nil{t.Fatal(e)}
  var before,after int64;w.QueryRow(`PRAGMA freelist_count`).Scan(&before);tx,e=w.BeginTx(context.Background(),nil);if e!=nil{t.Fatal(e)};started:=time.Now();rows,e:=tx.Query(`PRAGMA incremental_vacuum(16)`);if e!=nil{t.Fatal(e)};for rows.Next(){};if e=rows.Err();e!=nil{t.Fatal(e)};rows.Close();elapsed:=time.Since(started);tx.QueryRow(`PRAGMA freelist_count`).Scan(&after);if before-after!=16{t.Fatal("Go fixture reclaim delta",before,after)};tx.Rollback()
  w.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`);w.Close();s.Close();os.Chmod(path,0600)
@@ -13,4 +16,9 @@ func TestHistoryGCNativeFixtureExport(t *testing.T){
 }
 func TestHistoryGCNativeFixtureReadback(t *testing.T){
  path:=os.Getenv("AO_NATIVE_RECLAIM_READBACK");if path==""{t.Skip("test-only native-written fixture not requested")};w,e:=sql.Open("sqlite","file:"+path+"?mode=ro");if e!=nil{t.Fatal(e)};defer w.Close();var version,count,id,size int;if e=w.QueryRow(`SELECT max(version_id) FROM goose_db_version WHERE is_applied=1`).Scan(&version);e!=nil||version!=192{t.Fatal("schema roundtrip",version,e)};if e=w.QueryRow(`SELECT count(*),id,length(body) FROM native_reclaim_fixture`).Scan(&count,&id,&size);e!=nil||count!=1||id!=127||size!=8192{t.Fatal("payload roundtrip",count,id,size,e)}
+ var client,provider,state,request string;var rowid int
+ if e=w.QueryRow(`SELECT client_message_id FROM conversation_messages WHERE id='native-latest-input'`).Scan(&client);e!=nil||client!="native-latest-client"{t.Fatal("latest input lost",e)}
+ if e=w.QueryRow(`SELECT provider_turn_id,state FROM conversation_turns WHERE id='native-pending-turn'`).Scan(&provider,&state);e!=nil||provider!="native-current-provider"||state!="running"{t.Fatal("pending turn lost",provider,state,e)}
+ if e=w.QueryRow(`SELECT request_id FROM conversation_activities WHERE id='native-pending-question' AND status='pending'`).Scan(&request);e!=nil||request!="native-pending-request"{t.Fatal("pending interaction lost",e)}
+ if e=w.QueryRow(`SELECT rowid FROM native_reclaim_rowid_fixture WHERE id='implicit-2'`).Scan(&rowid);e!=nil||rowid!=2{t.Fatal("implicit rowid changed",rowid,e)}
 }

@@ -24,10 +24,10 @@ def identity(path):
     return item
 
 
-def schema(connection):
+def schema(connection,allow_full_restore=False):
     version=connection.execute('SELECT max(version_id) FROM goose_db_version WHERE is_applied=1').fetchone()[0]
     auto=connection.execute('PRAGMA auto_vacuum').fetchone()[0]
-    if version!=192 or auto!=2:raise ValueError('requires_schema192_incremental')
+    if version!=192 or auto not in ({1,2} if allow_full_restore else {2}):raise ValueError('requires_schema192_incremental')
     # Compile all schema table/index metadata using this exact native engine.
     tables=connection.execute("SELECT name FROM sqlite_schema WHERE type='table'").fetchall()
     for (name,) in tables:
@@ -70,6 +70,44 @@ def reclaim_batch(connection,count,budget,cancelled=None):
     finally:connection.set_progress_handler(None,0)
 
 
+def restore_incremental(connection):
+    # SetAutoVacuum changes the connection flag before writing meta[6]. This
+    # separate statement therefore cannot itself trigger another FULL reclaim.
+    if connection.in_transaction:connection.rollback()
+    connection.set_progress_handler(None,0)
+    connection.execute('PRAGMA auto_vacuum=INCREMENTAL').fetchall()
+    if connection.execute('PRAGMA auto_vacuum').fetchone()[0]!=2:
+        raise ValueError('incremental_restore_failed')
+
+
+def full_reclaim_once(connection):
+    before=pages(connection);started=time.monotonic();state='not_started'
+    connection.set_progress_handler(None,0)
+    try:
+        connection.execute('BEGIN IMMEDIATE');state='open'
+        connection.execute('PRAGMA auto_vacuum=FULL').fetchall()
+        # SQLite 3.46 autoVacuumCommit's bCommit=1 path clears the freelist
+        # once, skipping per-free-page BTALLOC_EXACT. Its inner commit loop
+        # does not provide an interrupt/progress deadline; never hard-kill it.
+        state='unknown';connection.commit();state='committed'
+        after=pages(connection)
+        if after['free_pages']!=0 or after['page_count']>before['page_count']:
+            raise ValueError('full_reclaim_invalid_delta')
+        return dict(before=before,after=after,free_pages_removed=before['free_pages'],logical_bytes_removed=(before['page_count']-after['page_count'])*before['page_size'],elapsed_ms=int((time.monotonic()-started)*1000),commit_state=state,full_commit_noninterruptible=True)
+    except BaseException as error:
+        if connection.in_transaction:
+            try:
+                connection.rollback()
+                if state=='open':state='rolled_back'
+            except sqlite3.Error:state='unknown'
+        error.ao_commit_state=state
+        raise
+    finally:
+        # Restoring 2 is a distinct durable transaction, including after a
+        # failed/rolled-back FULL attempt; in-memory flags alone are insufficient.
+        restore_incremental(connection)
+
+
 def stopped():
     for command in [['systemctl','show','albanews-ao-history-retention.timer','--property=ActiveState','--value'],['systemctl','--user','show','albanews-ao-component-user.service','--property=ActiveState','--value'],['systemctl','show','albanews-ao-history-retention.service','--property=ActiveState','--value']]:
         value=subprocess.run(command,capture_output=True,text=True,check=True).stdout.strip()
@@ -91,9 +129,9 @@ def run():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--database',type=Path,required=True);p.add_argument('--database-device',type=int,required=True);p.add_argument('--database-inode',type=int,required=True)
     p.add_argument('--maintenance-lock',type=Path,required=True);p.add_argument('--report',type=Path,required=True)
-    p.add_argument('--max-batches',type=int,default=0);p.add_argument('--inspect-only',action='store_true');p.add_argument('--batch-pages',type=int,default=4096);p.add_argument('--batch-seconds',type=float,default=30);p.add_argument('--wall-seconds',type=float,default=3600);p.add_argument('--cache-mib',type=int,default=128)
+    p.add_argument('--full-once',action='store_true',help='one offline FULL autovacuum commit then restore INCREMENTAL; commit has no hard deadline');p.add_argument('--restore-incremental-only',action='store_true',help='recover mode2 and checkpoint after an interrupted full-once');p.add_argument('--max-batches',type=int,default=0);p.add_argument('--inspect-only',action='store_true');p.add_argument('--batch-pages',type=int,default=4096);p.add_argument('--batch-seconds',type=float,default=30);p.add_argument('--wall-seconds',type=float,default=3600);p.add_argument('--cache-mib',type=int,default=128)
     a=p.parse_args();os.umask(0o077)
-    if not a.database.is_absolute() or min(a.batch_pages,a.batch_seconds,a.wall_seconds,a.cache_mib)<=0 or a.cache_mib>1024 or a.max_batches<0 or not all(math.isfinite(v) for v in (a.batch_seconds,a.wall_seconds)):raise ValueError('invalid_options')
+    if not a.database.is_absolute() or min(a.batch_pages,a.batch_seconds,a.wall_seconds,a.cache_mib)<=0 or a.cache_mib>1024 or a.max_batches<0 or a.full_once and a.restore_incremental_only or a.inspect_only and (a.full_once or a.restore_incremental_only) or not all(math.isfinite(v) for v in (a.batch_seconds,a.wall_seconds)):raise ValueError('invalid_options')
     parent=a.report.parent.lstat()
     if not stat.S_ISDIR(parent.st_mode) or parent.st_uid!=os.getuid() or stat.S_IMODE(parent.st_mode)!=0o700 or a.report.parent.is_symlink():raise ValueError('unsafe_report_parent')
     before=identity(a.database)
@@ -109,9 +147,9 @@ def run():
         with contextlib.closing(sqlite3.connect(uri,uri=True,isolation_level=None,timeout=0)) as connection:
             connection.execute('PRAGMA busy_timeout=0')
             if a.inspect_only:connection.execute('PRAGMA query_only=ON')
-            qualification=schema(connection)
+            qualification=schema(connection,a.restore_incremental_only)
             if not os.path.samestat(before,identity(a.database)):raise ValueError('database_identity_changed')
-            result=dict(status='running',stage='native_page_reclaim',qualification=qualification,committed_batches=0,free_pages_removed=0,logical_bytes_removed=0,main_file_bytes_before=before.st_size,database_device=before.st_dev,database_inode=before.st_ino)
+            result=dict(status='running',stage='native_page_reclaim',qualification=qualification,full_once=a.full_once,restore_incremental_only=a.restore_incremental_only,full_commit_hard_deadline=False if a.full_once else None,committed_batches=0,free_pages_removed=0,logical_bytes_removed=0,main_file_bytes_before=before.st_size,database_device=before.st_dev,database_inode=before.st_ino)
             if not a.inspect_only:
                 connection.execute('PRAGMA synchronous=FULL');connection.execute('PRAGMA cache_size=-'+str(a.cache_mib*1024));connection.execute('PRAGMA wal_autocheckpoint=0')
             deadline=time.monotonic()+a.wall_seconds
@@ -122,9 +160,15 @@ def run():
             save(a.report,result)
             phase='native_reclaim'
             try:
-                while not a.inspect_only and pages(connection)['free_pages']>0:
+                if a.restore_incremental_only:
+                    phase='restore_incremental';restore_incremental(connection)
+                    phase='native_checkpoint';checkpoint=connection.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+                    if checkpoint[0]!=0:raise ValueError('checkpoint_busy')
+                while not a.inspect_only and not a.restore_incremental_only and pages(connection)['free_pages']>0:
                     if time.monotonic()>=deadline or cancelled.is_set():result['status']='partial';break
-                    last=reclaim_batch(connection,a.batch_pages,min(a.batch_seconds,deadline-time.monotonic()),cancelled)
+                    phase='native_full_commit' if a.full_once else 'native_reclaim'
+                    result['stage']=phase;save(a.report,result)
+                    last=full_reclaim_once(connection) if a.full_once else reclaim_batch(connection,a.batch_pages,min(a.batch_seconds,deadline-time.monotonic()),cancelled)
                     result['last_batch']=last;result['committed_batches']+=1;result['free_pages_removed']+=last['free_pages_removed'];result['logical_bytes_removed']+=last['logical_bytes_removed']
                     phase='native_checkpoint'
                     connection.set_progress_handler(lambda:int(cancelled.is_set() or time.monotonic()>=deadline),1000)
@@ -135,13 +179,16 @@ def run():
                     save(a.report,result)
                     phase='native_reclaim'
                     if last['free_pages_removed']==0:raise ValueError('no_reclaim_progress')
+                    if a.full_once:break
                     if a.max_batches and result['committed_batches']>=a.max_batches:
                         result['status']='partial';break
                 if result['status']=='running':result['status']='preview_complete' if a.inspect_only else 'complete'
             except BaseException as error:
-                result['status']='failed';result['failed_phase']=phase;result['failed_batch_commit_state']='committed' if phase=='native_checkpoint' else getattr(error,'ao_commit_state','unknown');result['error_type']=getattr(error,'ao_error_enum',None) or ('interrupted' if isinstance(error,sqlite3.OperationalError) and getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_INTERRUPT else 'sqlite_error' if isinstance(error,sqlite3.Error) else 'guard_or_io_error')
+                result['status']='failed';result['failed_phase']=getattr(error,'ao_phase',phase);result['failed_batch_commit_state']='committed' if phase=='native_checkpoint' else getattr(error,'ao_commit_state','unknown');result['error_type']=getattr(error,'ao_error_enum',None) or ('interrupted' if isinstance(error,sqlite3.OperationalError) and getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_INTERRUPT else 'sqlite_error' if isinstance(error,sqlite3.Error) else 'guard_or_io_error')
                 if isinstance(error,sqlite3.Error):result['sqlite_code']=getattr(error,'sqlite_errorcode',None)
                 save(a.report,result);raise
+            result['final_auto_vacuum']=connection.execute('PRAGMA auto_vacuum').fetchone()[0]
+            if result['final_auto_vacuum']!=2:raise ValueError('incremental_restore_failed')
             result['final_pages']=pages(connection);result['main_file_bytes']=a.database.stat().st_size;save(a.report,result)
             print(json.dumps({k:result[k] for k in ('status','committed_batches','free_pages_removed','logical_bytes_removed','main_file_bytes')}))
     return 0
