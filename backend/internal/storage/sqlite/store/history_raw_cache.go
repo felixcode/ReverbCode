@@ -53,8 +53,7 @@ func applyRawCache(ctx context.Context,tx *sql.Tx,p maintenancePrepared,cutoff t
  if errors.Is(e,sql.ErrNoRows){result.Retained["row_missing"]++;return true,nil};if e!=nil{return false,e}
  if !reflect.DeepEqual(current.values(""),old.values(""))||payload!=old.Old{result.Retained["concurrent_body_or_owner_change"]++;return false,nil}
  if reason:=historyBodyCoverageReason(ctx,maintenanceRow{"id":old.ID},"raw");reason!=""{result.Retained[reason]++;return true,nil}
- if result.rawCacheProtection==nil {result.rawCacheProtection=map[string]historyGCProtection{}}
- reason,e:=historyGCEligible(ctx,tx,historyGCRow{conversation:old.Conversation,received:old.Received},HistoryGCOptions{Cutoff:cutoff},result.rawCacheProtection);if e!=nil{return false,e};if reason!=""{result.Retained[reason]++;return true,nil}
+ reason,e:=historyGCEligible(ctx,tx,historyGCRow{conversation:old.Conversation,received:old.Received},HistoryGCOptions{Cutoff:cutoff},result.rawCacheWriterProtection());if e!=nil{return false,e};if reason!=""{result.Retained[reason]++;return true,nil}
  if old.Small!=old.Old{
   var seqBefore,seqAfter int64;if e=tx.QueryRowContext(ctx,`SELECT seq FROM sqlite_sequence WHERE name='conversation_provider_events'`).Scan(&seqBefore);e!=nil{return false,e}
   removed,x:=tx.ExecContext(ctx,`DELETE FROM conversation_provider_events WHERE id=? AND payload_json IS ?`,old.ID,old.Old);if x!=nil{return false,x};n,x:=removed.RowsAffected();if x!=nil||n!=1{if x!=nil{return false,x};return false,errors.New("raw_cache_CAS_changed")}
@@ -63,4 +62,10 @@ func applyRawCache(ctx context.Context,tx *sql.Tx,p maintenancePrepared,cutoff t
   result.Compacted++;result.LogicalBytes+=int64(len(old.Old)-len(old.Small))
  }
  deleted,e:=tx.ExecContext(ctx,`DELETE FROM ao_history_retention WHERE object_kind='provider_event' AND object_id=?`,maintenanceID(old.ID));if e!=nil{return false,e};n,e:=deleted.RowsAffected();if e!=nil{return false,e};result.AuditDeleted+=int(n);return true,nil
+}
+
+// Each result belongs to one maintenance request and writer transaction.
+func (r *HistoryMaintenanceResult) rawCacheWriterProtection() map[string]historyGCProtection {
+ if r.rawCacheProtection==nil {r.rawCacheProtection=map[string]historyGCProtection{}}
+ return r.rawCacheProtection
 }
