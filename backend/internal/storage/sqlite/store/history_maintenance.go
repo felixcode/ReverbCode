@@ -54,6 +54,7 @@ func (o HistoryMaintenanceOptions) Validate() error {
 }
 
 type HistoryMaintenanceResult struct {
+ closedHistoryWriter *closedHistoryCache
  rawCacheSchemaChecked bool
  rawCacheProtection map[string]historyGCProtection
 	Phase                   string         `json:"phase,omitempty"`
@@ -88,6 +89,8 @@ type maintenanceStage struct {
 }
 
 var maintenanceStages = map[string]maintenanceStage{
+ "gc:closed-raw": {"conversation_provider_events","provider_event",nil,false},
+ "gc:closed-activity": {"conversation_activities","activity",nil,false},
  "gc:activity": {"conversation_activities","activity",nil,false},
  "gc:audit": {"ao_history_retention","",nil,false},
 	"gc:raw":                                {"conversation_provider_events", "provider_event", nil, false},
