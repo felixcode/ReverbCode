@@ -46,11 +46,20 @@ func prepareHistoryGCActivities(ctx context.Context,db maintenanceDB,ids []any)(
  for _,id:=range ids {row,e:=historyActivityGCMetadata(ctx,db,id);if e!=nil{var reason maintenanceRetained;if errors.As(e,&reason){plans=append(plans,maintenancePrepared{id:id,skip:string(reason)});continue};return nil,e};plans=append(plans,maintenancePrepared{id:id,row:row})};return plans,nil
 }
 
+func historyActivityGCRetainedReason(row maintenanceRow,cutoff time.Time)string{
+ if row.text("status")=="pending"{return "activity_pending_request"}
+ if row.text("provider_item_id")!=""||row.text("request_id")!=""{return "activity_native_or_request_identity"}
+ if !historyActivityGCClass(row.text("kind"),row.text("status"),"",""){return "activity_control_or_nonterminal"}
+ limit:=time.Now().UTC().Add(-48*time.Hour);if cutoff.After(limit){cutoff=limit}
+ for _,key:=range []string{"created_at","updated_at"}{old,e:=maintenanceOld(row.text(key),cutoff,true);if e!=nil{return "activity_invalid_timestamp"};if !old{return "activity_within_48h"}}
+ if row.text("turn_id")==""{return "activity_turn_unattributed"};return "activity_turn_expiry_unproven"
+}
+
 func applyHistoryGCActivity(ctx context.Context,tx *sql.Tx,p maintenancePrepared,cutoff time.Time,r *HistoryMaintenanceResult)(bool,error){
  if p.skip!="" {r.Retained[p.skip]++;return true,nil}
  current,e:=historyActivityGCMetadata(ctx,tx,p.id);if e!=nil{return false,e};if current==nil{return true,nil}
  if !reflect.DeepEqual(current,p.row){r.Retained["concurrent_body_or_owner_change"]++;return false,nil}
- eligible,e:=historyActivityGCEligible(ctx,tx,current,cutoff);if e!=nil{var reason maintenanceRetained;if errors.As(e,&reason){r.Retained[string(reason)]++;return true,nil};return false,e};if !eligible{r.Retained["activity_gc_unproven"]++;return true,nil}
+ eligible,e:=historyActivityGCEligible(ctx,tx,current,cutoff);if e!=nil{var reason maintenanceRetained;if errors.As(e,&reason){r.Retained[string(reason)]++;return true,nil};return false,e};if !eligible{r.Retained[historyActivityGCRetainedReason(current,cutoff)]++;return true,nil}
  var bodyBytes int64
  if e=tx.QueryRowContext(ctx,`SELECT octet_length(summary)+octet_length(detail_json)+octet_length(command_output)+octet_length(streamed_text) FROM conversation_activities WHERE id=?`,p.id).Scan(&bodyBytes);e!=nil{return false,e}
  a,e:=tx.ExecContext(ctx,`DELETE FROM ao_history_retention WHERE object_kind IN ('activity','activity_output') AND object_id=? AND conversation_id=?`,p.id,current.text("conversation_id"));if e!=nil{return false,e};n,e:=a.RowsAffected();if e!=nil{return false,e}

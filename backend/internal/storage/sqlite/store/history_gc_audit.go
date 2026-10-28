@@ -7,7 +7,9 @@ func(k historyAuditKey) String()string{v,_:=json.Marshal([2]string(k));return st
 func historyGCAuditKeys(ctx context.Context,db maintenanceDB,cursor string,limit int)([]any,error){
  var key historyAuditKey
  if cursor!=""{var parts []string;if len(cursor)>8192||json.Unmarshal([]byte(cursor),&parts)!=nil||len(parts)!=2{return nil,errors.New("invalid_audit_tuple_cursor")};key=historyAuditKey{parts[0],parts[1]}}
- rows,e:=db.QueryContext(ctx,`SELECT object_kind,object_id FROM ao_history_retention WHERE (object_kind,object_id)>(?,?) ORDER BY object_kind,object_id LIMIT ?`,key[0],key[1],limit);if e!=nil{return nil,e};defer rows.Close()
+ query:=`SELECT object_kind,object_id FROM ao_history_retention ORDER BY object_kind,object_id LIMIT ?`;args:=[]any{limit}
+ if cursor!="" {query=`SELECT object_kind,object_id FROM ao_history_retention WHERE (object_kind,object_id)>(?,?) ORDER BY object_kind,object_id LIMIT ?`;args=[]any{key[0],key[1],limit}}
+ rows,e:=db.QueryContext(ctx,query,args...);if e!=nil{return nil,e};defer rows.Close()
  ids:=[]any{};for rows.Next(){var next historyAuditKey;if e=rows.Scan(&next[0],&next[1]);e!=nil{return nil,e};if !utf8.ValidString(next[0])||!utf8.ValidString(next[1]){return nil,errors.New("audit_key_invalid_utf8")};ids=append(ids,next)};return ids,rows.Err()
 }
 func historyGCAuditMetadata(ctx context.Context,db maintenanceDB,id any)(maintenanceRow,error){
