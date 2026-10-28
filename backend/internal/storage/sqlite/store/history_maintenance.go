@@ -88,6 +88,8 @@ type maintenanceStage struct {
 }
 
 var maintenanceStages = map[string]maintenanceStage{
+ "gc:activity": {"conversation_activities","activity",nil,false},
+ "gc:audit": {"ao_history_retention","",nil,false},
 	"gc:raw":                                {"conversation_provider_events", "provider_event", nil, false},
 	"cache:raw":                              {"conversation_provider_events", "provider_event", []string{"payload_json"}, false},
 	"raw":                                   {"conversation_provider_events", "provider_event", []string{"payload_json"}, false},
@@ -116,6 +118,7 @@ func maintenanceRetain(result *HistoryMaintenanceResult, err error) bool {
 	return false
 }
 func maintenanceKey(ctx context.Context, db maintenanceDB, stage maintenanceStage) (string, bool, error) {
+ if stage.table=="ao_history_retention" {return "rowid",true,nil}
 	if !stage.builtin {
 		return "id", stage.table == "conversation_provider_events", nil
 	}
@@ -237,7 +240,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		return result, err
 	}
 	retention:=o.Retention;if req.Stage=="cache:raw"{retention=o.RawCacheRetention;if retention==0{retention=6*time.Hour}}
-	if cutoff.After(now.Add(-retention)) || req.Stage == "gc:raw" && cutoff.After(now.Add(-48*time.Hour)) {
+	if cutoff.After(now.Add(-retention)) || strings.HasPrefix(req.Stage,"gc:") && cutoff.After(now.Add(-48*time.Hour)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
 	// Separate, non-queued admission bounds all reader/CPU preparation memory.
