@@ -23,6 +23,7 @@ func closedHistoryOwner(ctx context.Context,db maintenanceDB,conversation string
  e:=db.QueryRowContext(ctx,`SELECT scope,COALESCE(session_id,'') FROM conversations WHERE id=?`,conversation).Scan(&scope,&session)
  if errors.Is(e,sql.ErrNoRows){return keep("closed_owner_missing")};if e!=nil{return closedHistoryProof{},e}
  if scope!="session"||session==""{return keep("closed_owner_review_or_unknown_scope")}
+ tail,e:=historyGCProtected(ctx,db,conversation);if e!=nil{return closedHistoryProof{},e};if tail.unknown||!tail.at.IsZero(){return keep("closed_owner_pending_delivery_or_turn")}
  yes,e:=maintenanceClosedOwner(ctx,db,conversation);if e!=nil{return closedHistoryProof{},e};if !yes{return keep("closed_owner_not_closed")}
  rows,e:=db.QueryContext(ctx,`SELECT session_id FROM conversation_branches WHERE conversation_id=? UNION SELECT session_id FROM conversations WHERE id=? UNION SELECT current_session_id FROM conversations WHERE id=?`,conversation,conversation,conversation);if e!=nil{return closedHistoryProof{},e}
  var owners []string
