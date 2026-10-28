@@ -10,32 +10,77 @@ import (
 )
 
 type closedHistoryProof struct { allowed bool; reason string }
-type closedHistoryCache struct { owners map[string]closedHistoryProof; anchors map[string]int64; activityAnchors map[string]string }
-func newClosedHistoryCache()*closedHistoryCache{return &closedHistoryCache{map[string]closedHistoryProof{},map[string]int64{},map[string]string{}}}
+type closedHistoryCache struct { owners map[string]closedHistoryProof; sessions map[string]closedHistoryProof; anchors map[string]int64; activityAnchors map[string]string }
+func newClosedHistoryCache()*closedHistoryCache{return &closedHistoryCache{map[string]closedHistoryProof{},map[string]closedHistoryProof{},map[string]int64{},map[string]string{}}}
 
-// This first release is strictly the stopped-daemon, sealed-backup path. The
-// wire API cannot set the unexported recovery coverage context.
+type closedHistoryOnlineGuardKey struct{}
+// SetClosedOwnerMaintenanceGuard is wired only by the daemon, not the request.
+// The guard must be memory-only, nonblocking, and conservative for unknowns.
+func(s *Store) SetClosedOwnerMaintenanceGuard(guard func(string)bool){if guard!=nil{s.closedOwnerMaintenanceGuard.Store(guard)}}
+func(s *Store) ClosedOwnerMaintenanceConfigured()bool{return s.closedOwnerMaintenanceGuard.Load()!=nil}
+
+// Offline requests carry sealed coverage; online requests require the daemon's
+// live ownership guard. A same-UID HTTP client cannot supply either authority.
+func closedHistorySessionProof(ctx context.Context,db maintenanceDB,owner string,cache *closedHistoryCache)(closedHistoryProof,error){
+ if p,ok:=cache.sessions[owner];ok{return p,nil}
+ keep:=func(reason string)(closedHistoryProof,error){p:=closedHistoryProof{false,reason};cache.sessions[owner]=p;return p,nil}
+ _,offline:=ctx.Value(historyBodyCoverageKey{}).(historyBodyCoverage);guard,online:=ctx.Value(closedHistoryOnlineGuardKey{}).(func(string)bool)
+ if !offline&&(!online||!guard(owner)){return keep("closed_owner_live_or_unknown_controller")}
+ var terminated,pinned,unsettled int
+ e:=db.QueryRowContext(ctx,`SELECT is_terminated,is_pinned,conversation_checkpoint_unsettled FROM sessions WHERE id=?`,owner).Scan(&terminated,&pinned,&unsettled)
+ if errors.Is(e,sql.ErrNoRows){return keep("closed_owner_missing")};if e!=nil{return closedHistoryProof{},e}
+ if terminated!=1||pinned!=0||unsettled!=0{return keep("closed_owner_current_or_checkpoint")}
+ pendingUsage,e:=maintenanceExists(ctx,db,`SELECT 1 FROM usage_bindings WHERE session_id=? AND state NOT IN ('complete','partial') LIMIT 1`,owner);if e!=nil{return closedHistoryProof{},e};if pendingUsage{return keep("closed_owner_native_usage_pending")}
+ // Review existence is not activity. Require its own terminal/post proof,
+ // without recursing through closedHistoryOwner or the old scope-only helper.
+ reviewRows,e:=db.QueryContext(ctx,`SELECT id FROM review WHERE session_id=?`,owner);if e!=nil{return closedHistoryProof{},e}
+ var reviewIDs []string;for reviewRows.Next(){var id string;if e=reviewRows.Scan(&id);e!=nil{break};reviewIDs=append(reviewIDs,id)};if e==nil{e=reviewRows.Err()};ce:=reviewRows.Close();if e==nil{e=ce};if e!=nil{return closedHistoryProof{},e}
+ for _,id:=range reviewIDs{proof,e:=closedHistoryReviewProof(ctx,db,id);if e!=nil{return closedHistoryProof{},e};if !proof.allowed{return keep(proof.reason)}}
+ pending,e:=maintenancePendingSwitch(ctx,db,owner);if e!=nil{return closedHistoryProof{},e};if pending{return keep("closed_owner_pending_switch")}
+ for _,q:=range []string{`SELECT 1 FROM conversation_turns WHERE handled_by_session_id=? AND state IN ('queued','running') LIMIT 1`,`SELECT 1 FROM review_run WHERE session_id=? AND status NOT IN ('complete','cancelled','failed') LIMIT 1`}{
+  pending,e=maintenanceExists(ctx,db,q,owner);if e!=nil{return closedHistoryProof{},e};if pending{return keep("closed_owner_unfinished_turn_or_review")}
+ }
+ // Inspect pending state in every owned conversation without recursively
+ // treating the mere existence of a historical review as live ownership.
+ rows,e:=db.QueryContext(ctx,`SELECT id FROM conversations WHERE session_id=? OR current_session_id=?
+ UNION SELECT conversation_id FROM conversation_branches WHERE session_id=?
+ UNION SELECT c.id FROM conversations c JOIN review r ON r.id=c.review_id OR r.id=c.current_review_id WHERE r.session_id=?
+ UNION SELECT b.conversation_id FROM conversation_branches b JOIN review r ON r.id=b.review_id WHERE r.session_id=?`,owner,owner,owner,owner,owner);if e!=nil{return closedHistoryProof{},e}
+ var ids []string;for rows.Next(){var id string;if e=rows.Scan(&id);e!=nil{break};ids=append(ids,id)};if e==nil{e=rows.Err()};ce=rows.Close();if e==nil{e=ce};if e!=nil{return closedHistoryProof{},e}
+ for _,id:=range ids{tail,e:=historyGCProtected(ctx,db,id);if e!=nil{return closedHistoryProof{},e};if tail.unknown||!tail.at.IsZero(){return keep("closed_owner_pending_delivery_or_turn")}}
+ p:=closedHistoryProof{true,""};cache.sessions[owner]=p;return p,nil
+}
+func closedHistoryReviewProof(ctx context.Context,db maintenanceDB,id string)(closedHistoryProof,error){
+ var owner string;e:=db.QueryRowContext(ctx,`SELECT session_id FROM review WHERE id=?`,id).Scan(&owner)
+ if errors.Is(e,sql.ErrNoRows){return closedHistoryProof{false,"closed_review_missing"},nil};if e!=nil{return closedHistoryProof{},e}
+ for _,q:=range []string{`SELECT 1 FROM pr WHERE session_id=? AND is_merged=0 AND is_closed=0 LIMIT 1`,`SELECT 1 FROM usage_bindings WHERE session_id=? AND state NOT IN ('complete','partial') LIMIT 1`}{
+  yes,e:=maintenanceExists(ctx,db,q,owner);if e!=nil{return closedHistoryProof{},e};if yes{return closedHistoryProof{false,"closed_review_open_pr_or_native_usage"},nil}
+ }
+ rows,e:=db.QueryContext(ctx,`SELECT status,COALESCE(verdict,''),COALESCE(github_review_id,'') FROM review_run WHERE review_id=?`,id);if e!=nil{return closedHistoryProof{},e};defer rows.Close();count:=0
+ for rows.Next(){var state,verdict,post string;if e=rows.Scan(&state,&verdict,&post);e!=nil{return closedHistoryProof{},e};count++
+  if state!="complete"&&state!="cancelled"&&state!="failed"{return closedHistoryProof{false,"closed_review_unfinished"},nil}
+  if state=="complete"&&(post==""||(verdict!="approved"&&verdict!="changes_requested")){return closedHistoryProof{false,"closed_review_post_unproven"},nil}
+ };if e=rows.Err();e!=nil{return closedHistoryProof{},e};if count==0{return closedHistoryProof{false,"closed_review_no_lifecycle_proof"},nil};return closedHistoryProof{true,""},nil
+}
 func closedHistoryOwner(ctx context.Context,db maintenanceDB,conversation string,cutoff time.Time,cache *closedHistoryCache)(closedHistoryProof,error){
  if v,ok:=cache.owners[conversation];ok{return v,nil}
  keep:=func(reason string)(closedHistoryProof,error){v:=closedHistoryProof{false,reason};cache.owners[conversation]=v;return v,nil}
- _,ok:=ctx.Value(historyBodyCoverageKey{}).(historyBodyCoverage);if !ok{return keep("closed_owner_offline_proof_required")}
- var scope,session string
- e:=db.QueryRowContext(ctx,`SELECT scope,COALESCE(session_id,'') FROM conversations WHERE id=?`,conversation).Scan(&scope,&session)
+ _,offline:=ctx.Value(historyBodyCoverageKey{}).(historyBodyCoverage);_,online:=ctx.Value(closedHistoryOnlineGuardKey{}).(func(string)bool);if !offline&&!online{return keep("closed_owner_lifecycle_proof_required")}
+ var scope,session,reviewID string
+ e:=db.QueryRowContext(ctx,`SELECT scope,COALESCE(session_id,''),COALESCE(review_id,'') FROM conversations WHERE id=?`,conversation).Scan(&scope,&session,&reviewID)
  if errors.Is(e,sql.ErrNoRows){return keep("closed_owner_missing")};if e!=nil{return closedHistoryProof{},e}
- if scope!="session"||session==""{return keep("closed_owner_review_or_unknown_scope")}
+ if (scope!="session"&&scope!="review")||(scope=="session"&&session=="")||(scope=="review"&&reviewID==""){return keep("closed_owner_unknown_scope")}
  tail,e:=historyGCProtected(ctx,db,conversation);if e!=nil{return closedHistoryProof{},e};if tail.unknown||!tail.at.IsZero(){return keep("closed_owner_pending_delivery_or_turn")}
- yes,e:=maintenanceClosedOwner(ctx,db,conversation);if e!=nil{return closedHistoryProof{},e};if !yes{return keep("closed_owner_not_closed")}
- rows,e:=db.QueryContext(ctx,`SELECT session_id FROM conversation_branches WHERE conversation_id=? UNION SELECT session_id FROM conversations WHERE id=? UNION SELECT current_session_id FROM conversations WHERE id=?`,conversation,conversation,conversation);if e!=nil{return closedHistoryProof{},e}
- var owners []string
- for rows.Next(){var owner sql.NullString;if e=rows.Scan(&owner);e!=nil{break};if owner.Valid&&owner.String!=""{owners=append(owners,owner.String)}}
- if e==nil{e=rows.Err()};ce:=rows.Close();if e==nil{e=ce};if e!=nil{return closedHistoryProof{},e}
- for _,owner:=range owners{
-  var terminated,pinned,unsettled int
-  if e=db.QueryRowContext(ctx,`SELECT is_terminated,is_pinned,conversation_checkpoint_unsettled FROM sessions WHERE id=?`,owner).Scan(&terminated,&pinned,&unsettled);e!=nil{if errors.Is(e,sql.ErrNoRows){return keep("closed_owner_missing")};return closedHistoryProof{},e}
-  if terminated!=1||pinned!=0||unsettled!=0{return keep("closed_owner_current_or_checkpoint")}
-  yes,e=maintenanceSessionClosed(ctx,db,owner);if e!=nil{return closedHistoryProof{},e};if !yes{return keep("closed_owner_session_pending")}
-
+ if scope=="review"{
+  rows,e:=db.QueryContext(ctx,`SELECT review_id FROM conversations WHERE id=? UNION SELECT current_review_id FROM conversations WHERE id=? UNION SELECT review_id FROM conversation_branches WHERE conversation_id=?`,conversation,conversation,conversation);if e!=nil{return closedHistoryProof{},e}
+  var ids []string;for rows.Next(){var id sql.NullString;if e=rows.Scan(&id);e!=nil{break};if id.Valid&&id.String!=""{ids=append(ids,id.String)}};if e==nil{e=rows.Err()};ce:=rows.Close();if e==nil{e=ce};if e!=nil{return closedHistoryProof{},e}
+  for _,id:=range ids{proof,e:=closedHistoryReviewProof(ctx,db,id);if e!=nil{return closedHistoryProof{},e};if !proof.allowed{return keep(proof.reason)}}
  }
+ rows,e:=db.QueryContext(ctx,`SELECT session_id FROM conversation_branches WHERE conversation_id=?
+ UNION SELECT session_id FROM conversations WHERE id=? UNION SELECT current_session_id FROM conversations WHERE id=?
+ UNION SELECT r.session_id FROM review r WHERE r.id IN (SELECT review_id FROM conversations WHERE id=? UNION SELECT current_review_id FROM conversations WHERE id=? UNION SELECT review_id FROM conversation_branches WHERE conversation_id=?)`,conversation,conversation,conversation,conversation,conversation,conversation);if e!=nil{return closedHistoryProof{},e}
+ var owners []string;for rows.Next(){var owner sql.NullString;if e=rows.Scan(&owner);e!=nil{break};if owner.Valid&&owner.String!=""{owners=append(owners,owner.String)}};if e==nil{e=rows.Err()};ce:=rows.Close();if e==nil{e=ce};if e!=nil{return closedHistoryProof{},e};if len(owners)==0{return keep("closed_owner_missing")}
+ for _,owner:=range owners{proof,e:=closedHistorySessionProof(ctx,db,owner,cache);if e!=nil{return closedHistoryProof{},e};if !proof.allowed{return keep(proof.reason)}}
  proof:=closedHistoryProof{true,""};cache.owners[conversation]=proof;return proof,nil
 }
 

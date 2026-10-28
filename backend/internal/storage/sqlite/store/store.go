@@ -29,6 +29,7 @@ type Store struct {
 	readOnly               bool
 	historyRetentionAbsent bool
 	maintenanceBusy        atomic.Bool
+ closedOwnerMaintenanceGuard atomic.Value
 
 	agentSwitchFailureEventMetadata *domain.AgentSwitchEventMetadata
 	agentSwitchFailureEventEncoder  ports.AgentSwitchFailureEventEncoder

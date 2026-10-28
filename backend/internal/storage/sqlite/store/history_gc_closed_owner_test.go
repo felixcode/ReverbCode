@@ -61,3 +61,29 @@ func TestClosedOwnerGCActivityKeepsSequenceWatermarkAndRecentMutableRows(t *test
  r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),f.request("gc:closed-activity"),o,f.now);if e!=nil||r.Deleted!=2||r.AuditDeleted!=2{t.Fatalf("closed activities %+v %v",r,e)}
  for _,id:=range []string{"recent-mutable","last-watermark"}{var n int;f.db.QueryRow(`SELECT count(*) FROM conversation_activities WHERE id=?`,id).Scan(&n);if n!=1{t.Fatal("mutable/watermark lost")}}
 }
+
+func TestClosedOwnerGCOnlineGuardRechecksWriterWithoutOfflineCoverage(t *testing.T){
+ f:=closedOwnerSeed(t);o:=adapter.DefaultHistoryMaintenanceOptions();o.ReadBudget=5*time.Second;o.WriteBudget=5*time.Second
+ req:=f.request("gc:closed-raw");req.OfflineCoverageBefore=time.Time{};req.OfflineMaxEventID=0
+ calls:=0;f.s.SetClosedOwnerMaintenanceGuard(func(string)bool{calls++;return calls==1})
+ r,e:=f.s.MaintainHistoryBatch(context.Background(),req,o);if e!=nil||r.Deleted!=0||calls<2{t.Fatalf("writer did not freshly recheck live owner %+v %v calls%d",r,e,calls)}
+ f.s.SetClosedOwnerMaintenanceGuard(func(string)bool{return true})
+ r,e=f.s.MaintainHistoryBatch(context.Background(),req,o);if e!=nil||r.Deleted!=4{t.Fatalf("online closed owner was not cleaned %+v %v",r,e)}
+}
+
+func TestClosedOwnerGCReviewLifecycleDoesNotMakeSessionPermanentlyPending(t *testing.T){
+ for _,test:=range []struct{name,post,usage string;reviewDeleted bool}{{"posted","github-123","",true},{"unposted","","",false},{"usage_pending","github-123","finalizing",false}}{t.Run(test.name,func(t *testing.T){
+  f:=closedOwnerSeed(t);ctx:=context.Background();review:=domain.Review{ID:"closed-review",SessionID:domain.SessionID(f.owner),ProjectID:"closed-owner",Harness:domain.ReviewerCodex,ReviewerActivityState:domain.ActivityActive,CreatedAt:histClock,UpdatedAt:histClock}
+  if e:=f.s.UpsertReview(ctx,review);e!=nil{t.Fatal(e)}
+  conv,e:=f.s.CreateReviewConversation(ctx,"old-review-conv",review.ID,"closed-owner",domain.SessionID(f.owner),histClock);if e!=nil{t.Fatal(e)}
+  if e=f.s.InsertReviewRun(ctx,domain.ReviewRun{ID:"review-run",ReviewID:review.ID,SessionID:domain.SessionID(f.owner),Harness:domain.ReviewerCodex,PRURL:"https://example.invalid/pull/1",TargetSHA:"old",Status:domain.ReviewRunComplete,Verdict:domain.VerdictApproved,GithubReviewID:test.post,CreatedAt:histClock});e!=nil{t.Fatal(e)}
+  var branch string;if e=f.db.QueryRow(`SELECT active_branch_id FROM conversations WHERE id=?`,conv.ID).Scan(&branch);e!=nil{t.Fatal(e)}
+  old:=f.now.Add(-72*time.Hour).Format(time.RFC3339Nano)
+  if _,e=f.db.Exec(`INSERT INTO conversation_provider_events(id,conversation_id,session_id,provider_event_id,method,payload_json,received_at,branch_id)VALUES(8,?,?, 'review-native', 'message.delta','{}',?,?)`,conv.ID,f.owner,old,branch);e!=nil{t.Fatal(e)}
+  if test.usage!=""{if _,e=f.db.Exec(`INSERT INTO usage_bindings(session_id,harness,native_root_id,initial_model_id,state,last_error_code,updated_at)VALUES(?,'codex','native','model',?,'source_discovery_pending',?)`,f.owner,test.usage,old);e!=nil{t.Fatal(e)}}
+  o:=adapter.DefaultHistoryMaintenanceOptions();o.ReadBudget=5*time.Second;o.WriteBudget=5*time.Second;req:=f.request("gc:closed-raw");req.OfflineMaxEventID=100
+  r,e:=f.s.MaintainHistorySnapshotBatch(ctx,req,o,f.now);if e!=nil{t.Fatalf("strict review %+v %v",r,e)}
+  var n int;f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=1`).Scan(&n);if (n==0)!=test.reviewDeleted{t.Fatal("session did not use actual terminal review proof")}
+  f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=8`).Scan(&n);if (n==0)!=test.reviewDeleted{t.Fatalf("review proof wrong n%d result%+v",n,r)}
+ })}
+}

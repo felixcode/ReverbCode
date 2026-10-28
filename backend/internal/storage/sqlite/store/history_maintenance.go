@@ -178,6 +178,7 @@ func (s *Store) MaintainHistorySnapshotBatch(ctx context.Context, req HistoryMai
 }
 
 func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenanceRequest, o HistoryMaintenanceOptions, now time.Time, rawNoBodyFastPath ...bool) (result HistoryMaintenanceResult, err error) {
+ if guard,ok:=s.closedOwnerMaintenanceGuard.Load().(func(string)bool);ok{ctx=context.WithValue(ctx,closedHistoryOnlineGuardKey{},guard)}
 	result = HistoryMaintenanceResult{Phase: "validation", Status: "deferred", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}
 	defer func() {
 		if err != nil {
