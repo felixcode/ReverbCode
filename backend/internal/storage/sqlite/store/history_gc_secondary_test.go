@@ -2,6 +2,7 @@ package store_test
 
 import (
  "context"
+ "encoding/json"
  "database/sql"
  "path/filepath"
  "testing"
@@ -61,4 +62,19 @@ func TestSecondaryAuditGCOnlyOldKnownSourceMissing(t *testing.T){
  if _,e=db.Exec(`INSERT INTO ao_history_retention VALUES('session',?,'c','','',0,'',?,?,'[]')`,owner.ID,old,old);e!=nil{t.Fatal(e)}
  cap:=s.HistoryRetentionCapability();o:=adapter.DefaultHistoryMaintenanceOptions();req:=adapter.HistoryMaintenanceRequest{Stage:"gc:audit",Cutoff:time.Now().UTC().Add(-48*time.Hour).Format(time.RFC3339Nano),DatabaseDevice:cap["dbDevice"].(uint64),DatabaseInode:cap["dbInode"].(uint64)}
  got,e:=s.MaintainHistoryBatch(ctx,req,o);if e!=nil||got.AuditDeleted!=2||got.Deleted!=2||got.Retained["audit_provider_event_owned"]!=1||got.Retained["audit_kind_unknown"]!=1||got.Retained["audit_within_48h"]!=1||got.Retained["audit_invalid_timestamp"]!=1||got.Retained["audit_source_present"]!=1{t.Fatalf("audit policy %+v %v",got,e)}
+}
+
+func TestSecondaryAuditTupleCursorSurvivesVacuumAndRejectsMalformed(t *testing.T){
+ ctx:=context.Background();dir:=t.TempDir();s,e:=sqlite.Open(dir);if e!=nil{t.Fatal(e)};defer s.Close();db,e:=sql.Open("sqlite",filepath.Join(dir,"ao.db"));if e!=nil{t.Fatal(e)};defer db.Close()
+ old:=time.Now().UTC().Add(-72*time.Hour).Format(time.RFC3339Nano)
+ // Deliberately reverse physical row order relative to the composite key.
+ for _,key:=range []string{"z","m","a"}{if _,e=db.Exec(`INSERT INTO ao_history_retention VALUES('activity',?,'c','','',0,'',?,?,'[]')`,key,old,old);e!=nil{t.Fatal(e)}}
+ cap:=s.HistoryRetentionCapability();o:=adapter.DefaultHistoryMaintenanceOptions();req:=adapter.HistoryMaintenanceRequest{Stage:"gc:audit",BatchRows:1,Cutoff:time.Now().UTC().Add(-48*time.Hour).Format(time.RFC3339Nano),DatabaseDevice:cap["dbDevice"].(uint64),DatabaseInode:cap["dbInode"].(uint64)}
+ got,e:=s.MaintainHistoryBatch(ctx,req,o);if e!=nil||got.AuditDeleted!=1{t.Fatalf("tuple first %+v %v",got,e)}
+ var pair []string;if json.Unmarshal([]byte(got.NextCursor),&pair)!=nil||len(pair)!=2||pair[0]!="activity"||pair[1]!="a"{t.Fatal("cursor was not composite key")}
+ if _,e=db.Exec(`VACUUM`);e!=nil{t.Fatal(e)}
+ req.Cursor=got.NextCursor;got,e=s.MaintainHistoryBatch(ctx,req,o);if e!=nil||got.AuditDeleted!=1{t.Fatalf("post vacuum %+v %v",got,e)}
+ if json.Unmarshal([]byte(got.NextCursor),&pair)!=nil||pair[1]!="m"{t.Fatal("physical order replaced stable PK")}
+ req.Cursor="1";if _,e=s.MaintainHistoryBatch(ctx,req,o);e==nil{t.Fatal("rowid cursor accepted")}
+ var n int;db.QueryRow(`SELECT count(*) FROM ao_history_retention WHERE object_kind='activity' AND object_id='z'`).Scan(&n);if n!=1{t.Fatal("unconfirmed tuple skipped/deleted")}
 }
