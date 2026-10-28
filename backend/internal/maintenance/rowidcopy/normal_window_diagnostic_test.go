@@ -137,7 +137,7 @@ func normalWindow(ctx context.Context, call normalBatchCall, input normalWindowI
 	if input.Rows == 0 {
 		return out
 	}
-	if input.Rows != len(input.IDs) || input.Rows > normalWindowRows || (req.BatchRows != 10 && req.BatchRows != 100) || options.ReadBudget != 2*time.Second || options.WriteBudget != 250*time.Millisecond {
+	if input.Rows != len(input.IDs) || input.Rows > normalWindowRows || (req.BatchRows != 10 && req.BatchRows != 25 && req.BatchRows != 100) || options.ReadBudget != 2*time.Second || options.WriteBudget != 250*time.Millisecond {
 		out.Status = "invalid_diagnostic_input"
 		return out
 	}
@@ -247,6 +247,18 @@ func normalComparable(a, b normalWindowResult) bool {
 // Opt-in only behind a fixed private recipe. The original remains RO and never
 // becomes an AO data directory. No server, provider, session or model is started.
 func TestClosedCandidateNormalMaintenanceWindows(t *testing.T) {
+	normalCandidateWindows(t, []int{10, 100}, "")
+}
+
+func TestClosedCandidateNormalMaintenance25Windows(t *testing.T) {
+	// Exact prior 10-row diagnostic cutoff, not an offline eligibility clock.
+	// The fixed private recipe independently binds that baseline report SHA and
+	// compares each original ID/size input digest against this fresh copy.
+	normalCandidateWindows(t, []int{25}, "2026-10-26T09:34:19.772735079Z")
+}
+
+func normalCandidateWindows(t *testing.T, trials []int, cutoff string) {
+	t.Helper()
 	source := os.Getenv("AO_RECOVERY_CANDIDATE_SOURCE")
 	if source == "" {
 		t.Skip("private_closed_candidate_recipe_only")
@@ -257,10 +269,16 @@ func TestClosedCandidateNormalMaintenanceWindows(t *testing.T) {
 		t.Fatal("normal_window_source_rejected")
 	}
 	options := store.DefaultHistoryMaintenanceOptions()
-	cutoff := time.Now().UTC().Add(-options.Retention - time.Second).Format(time.RFC3339Nano)
+	if cutoff == "" {
+		cutoff = time.Now().UTC().Add(-options.Retention - time.Second).Format(time.RFC3339Nano)
+	}
+	at, cutoffErr := time.Parse(time.RFC3339Nano, cutoff)
+	if cutoffErr != nil || at.After(time.Now().UTC().Add(-options.Retention)) {
+		t.Fatal("normal_window_invalid_cutoff")
+	}
 	results := []normalWindowResult{}
 	setups := []map[string]any{}
-	for _, batch := range []int{10, 100} {
+	for _, batch := range trials {
 		at := time.Now()
 		data, err := copyClosedCandidate(source, sha, "/work", token)
 		if err != nil {
@@ -321,14 +339,16 @@ func TestClosedCandidateNormalMaintenanceWindows(t *testing.T) {
 		}
 	}
 	comparable := 0
-	for i := 0; i < 3; i++ {
-		comparable += boolInt(normalComparable(results[i], results[i+3]))
+	if len(trials) == 2 {
+		for i := 0; i < 3; i++ {
+			comparable += boolInt(normalComparable(results[i], results[i+3]))
+		}
 	}
 	value := map[string]any{"status": "normal_window_diagnostic_finished", "source_sha256": sha,
 		"normal_entry_point": "Store.MaintainHistoryBatch", "snapshot_entry_used": false,
 		"read_budget_ns": int64(options.ReadBudget), "write_budget_ns": int64(options.WriteBudget), "request_parent_budget_ns": int64(options.ReadBudget + options.WriteBudget),
 		"yield_ns": int64(normalWindowYield), "case_wall_budget_seconds": 45, "cutoff": cutoff,
-		"source_copies": 2, "max_rows_per_trial": 3000, "setup": setups, "windows": results,
+		"source_copies": len(trials), "baseline_compared_inside_test": len(trials) == 2, "max_rows_per_trial": 3000, "setup": setups, "windows": results,
 		"same_input_complete_body_case_pairs": comparable, "sample_sufficient_for_ordinary_window_comparison": comparable > 0,
 		"IPC_and_real_business_concurrency": "U_not_exercised", "full_cycle_48h_or_production_ETA": "U_not_proven", "quiet_performance_acceptance": false,
 		"copy_and_migration_excluded_from_window_throughput": true, "cache_state_reset": false, "production_actions": []string{}}
@@ -455,5 +475,25 @@ func TestNormalWindowUsesCurrentApplicationEligibility(t *testing.T) {
 	after, err := normalMetadata(context.Background(), path, 0, 12)
 	if err != nil || calls != 2 || out.Status != "window_complete" || out.Scanned != 12 || out.Compacted != 10 || out.Retained["raw_turn_unattributed"] != 2 || out.Markers != 0 || input.Payload-after.Payload != out.LogicalBytes || out.LogicalBytes <= 0 {
 		t.Fatal("normal_current_eligibility_or_confirmed_body_delta")
+	}
+}
+
+func TestNormalWindow25KeepsOriginalBudgetsAndInputBound(t *testing.T) {
+	ids := make([]int64, 25)
+	for i := range ids {
+		ids[i] = int64(i + 1)
+	}
+	calls := 0
+	call := func(ctx context.Context, req store.HistoryMaintenanceRequest, o store.HistoryMaintenanceOptions) (store.HistoryMaintenanceResult, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 2250*time.Millisecond || req.BatchRows != 25 || req.ReadBudgetNS != int64(2*time.Second) || req.WriteBudgetNS != int64(250*time.Millisecond) || o.ReadBudget != 2*time.Second || o.WriteBudget != 250*time.Millisecond {
+			t.Fatal("normal_25_original_limits_changed")
+		}
+		return store.HistoryMaintenanceResult{Status: "ok", Stage: "raw", CommitState: "committed", Committed: true, Scanned: 25, Compacted: 25, NextCursor: "25"}, nil
+	}
+	out := normalWindow(context.Background(), call, normalWindowInput{Rows: 25, IDs: ids}, store.HistoryMaintenanceRequest{Stage: "raw", BatchRows: 25}, store.DefaultHistoryMaintenanceOptions(), 5*time.Second)
+	if calls != 1 || out.Scanned != 25 || out.Compacted != 25 || out.Status != "window_complete" || out.UnknownRequests != 0 {
+		t.Fatal("normal_25_input_bound_or_status")
 	}
 }
