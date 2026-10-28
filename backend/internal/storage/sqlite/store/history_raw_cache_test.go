@@ -4,7 +4,7 @@ func cacheFixture(t *testing.T)(*sqlite.Store,*sql.DB,string,string){
  t.Helper();dir:=t.TempDir();s,e:=sqlite.Open(dir);if e!=nil{t.Fatal(e)};t.Cleanup(func(){s.Close()});seedProject(t,s,"raw-cache");r:=sampleRecord("raw-cache");r.Mode=domain.SessionModeChat;session,e:=s.CreateSession(context.Background(),r);if e!=nil{t.Fatal(e)};conv,e:=s.CreateConversation(context.Background(),"raw-cache-conv",domain.ConversationScopeSession,"raw-cache",session.ID,histClock);if e!=nil{t.Fatal(e)};db,e:=sql.Open("sqlite",filepath.Join(dir,"ao.db"));if e!=nil{t.Fatal(e)};t.Cleanup(func(){db.Close()});return s,db,conv.ID,string(session.ID)
 }
 func cacheRun(t *testing.T,s *sqlite.Store,cursor string,maxID int64)(adapter.HistoryMaintenanceResult,error){
- t.Helper();cap:=s.HistoryRetentionCapability();now:=time.Now().UTC();o:=adapter.DefaultHistoryMaintenanceOptions();o.RawCacheRetention=6*time.Hour;o.BatchRows=250;o.ReadBudget=2*time.Second;o.WriteBudget=2*time.Second
+ t.Helper();cap:=s.HistoryRetentionCapability();now:=time.Now().UTC();o:=adapter.DefaultHistoryMaintenanceOptions();o.RawCacheRetention=6*time.Hour;o.BatchRows=250;o.RawCacheBatchRows=250;o.ReadBudget=2*time.Second;o.WriteBudget=2*time.Second
  return s.MaintainHistorySnapshotBatch(context.Background(),adapter.HistoryMaintenanceRequest{Stage:"cache:raw",Cursor:cursor,Cutoff:now.Add(-6*time.Hour).Format(time.RFC3339Nano),DatabaseDevice:cap["dbDevice"].(uint64),DatabaseInode:cap["dbInode"].(uint64),OfflineCoverageBefore:now.Add(-time.Hour),OfflineMaxEventID:maxID},o,now)
 }
 func cacheMeta(t *testing.T,db *sql.DB)[32]byte{
