@@ -4,6 +4,7 @@ import (
  "context"
  "database/sql"
  "reflect"
+ "strings"
  "errors"
  "time"
  "github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -41,9 +42,19 @@ func historyActivityGCMetadata(ctx context.Context,db maintenanceDB,id any)(main
  return maintenanceMetadata(ctx,db,"conversation_activities","activity",id)
 }
 
+// Native-identified rows are always retained. Read only the early identity
+// column once for this PK window, avoiding overflow-bearing metadata tails.
 func prepareHistoryGCActivities(ctx context.Context,db maintenanceDB,ids []any)([]maintenancePrepared,error){
- plans:=make([]maintenancePrepared,0,len(ids))
- for _,id:=range ids {row,e:=historyActivityGCMetadata(ctx,db,id);if e!=nil{var reason maintenanceRetained;if errors.As(e,&reason){plans=append(plans,maintenancePrepared{id:id,skip:string(reason)});continue};return nil,e};plans=append(plans,maintenancePrepared{id:id,row:row})};return plans,nil
+ plans:=make([]maintenancePrepared,0,len(ids));if len(ids)==0{return plans,nil}
+ marks:=strings.TrimSuffix(strings.Repeat("?,",len(ids)),",")
+ rows,e:=db.QueryContext(ctx,`SELECT id,typeof(provider_item_id),CASE WHEN typeof(provider_item_id)='text' THEN provider_item_id<>'' ELSE 0 END FROM conversation_activities WHERE id IN (`+marks+`)`,ids...);if e!=nil{return nil,e}
+ keep:=map[string]string{}
+ for rows.Next(){var id,kind string;var native bool;if e=rows.Scan(&id,&kind,&native);e!=nil{break};if kind!="text"{keep[id]="activity_identity_type_unknown"}else if native{keep[id]="activity_native_or_request_identity"}}
+ if e==nil{e=rows.Err()};closeErr:=rows.Close();if e==nil{e=closeErr};if e!=nil{return nil,e}
+ for _,id:=range ids {
+  if reason:=keep[maintenanceID(id)];reason!=""{plans=append(plans,maintenancePrepared{id:id,skip:reason});continue}
+  row,e:=historyActivityGCMetadata(ctx,db,id);if e!=nil{var reason maintenanceRetained;if errors.As(e,&reason){plans=append(plans,maintenancePrepared{id:id,skip:string(reason)});continue};return nil,e};plans=append(plans,maintenancePrepared{id:id,row:row})
+ };return plans,nil
 }
 
 func historyActivityGCRetainedReason(row maintenanceRow,cutoff time.Time)string{
