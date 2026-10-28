@@ -33,6 +33,7 @@ type HistoryMaintenanceRequest struct {
 }
 type HistoryMaintenanceOptions struct {
 	Retention   time.Duration
+ RawCacheRetention time.Duration
 	BatchRows   int
 	GCBatchRows int
 	BatchBytes  int64
@@ -42,16 +43,17 @@ type HistoryMaintenanceOptions struct {
 }
 
 func DefaultHistoryMaintenanceOptions() HistoryMaintenanceOptions {
-	return HistoryMaintenanceOptions{Retention: 47 * time.Hour, BatchRows: 100, GCBatchRows: 250, BatchBytes: 16 << 20, MaxRowBytes: 8 << 20, ReadBudget: 2 * time.Second, WriteBudget: 250 * time.Millisecond}
+	return HistoryMaintenanceOptions{Retention: 47 * time.Hour, RawCacheRetention:6*time.Hour, BatchRows: 100, GCBatchRows: 250, BatchBytes: 16 << 20, MaxRowBytes: 8 << 20, ReadBudget: 2 * time.Second, WriteBudget: 250 * time.Millisecond}
 }
 func (o HistoryMaintenanceOptions) Validate() error {
-	if o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.GCBatchRows <= 0 || o.GCBatchRows > 1000 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
+	if o.RawCacheRetention<0 || o.RawCacheRetention>48*time.Hour || o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.GCBatchRows <= 0 || o.GCBatchRows > 1000 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
 		return errors.New("invalid maintenance settings")
 	}
 	return nil
 }
 
 type HistoryMaintenanceResult struct {
+ rawCacheSchemaChecked bool
 	Phase                   string         `json:"phase,omitempty"`
 	CommitState             string         `json:"commit_state"`
 	WriterReservedMS        float64        `json:"writer_reserved_ms"`
@@ -85,6 +87,7 @@ type maintenanceStage struct {
 
 var maintenanceStages = map[string]maintenanceStage{
 	"gc:raw":                                {"conversation_provider_events", "provider_event", nil, false},
+	"cache:raw":                              {"conversation_provider_events", "provider_event", []string{"payload_json"}, false},
 	"raw":                                   {"conversation_provider_events", "provider_event", []string{"payload_json"}, false},
 	"outputs":                               {"conversation_activities", "activity_output", []string{"command_output", "streamed_text"}, false},
 	"message":                               {"conversation_messages", "message", []string{"text", "delivery_content_json"}, false},
@@ -230,7 +233,8 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	if err != nil {
 		return result, err
 	}
-	if cutoff.After(now.Add(-o.Retention)) || req.Stage == "gc:raw" && cutoff.After(now.Add(-48*time.Hour)) {
+	retention:=o.Retention;if req.Stage=="cache:raw"{retention=o.RawCacheRetention;if retention==0{retention=6*time.Hour}}
+	if cutoff.After(now.Add(-retention)) || req.Stage == "gc:raw" && cutoff.After(now.Add(-48*time.Hour)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
 	// Separate, non-queued admission bounds all reader/CPU preparation memory.
