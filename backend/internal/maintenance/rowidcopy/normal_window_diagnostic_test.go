@@ -77,7 +77,7 @@ func normalMetadata(ctx context.Context, path string, cursor int64, limit int) (
 	out.Rows = len(out.IDs)
 	out.IDHash, out.SizeHash = hex.EncodeToString(idHash.Sum(nil)), hex.EncodeToString(sizeHash.Sum(nil))
 	if out.Rows != 0 {
-		args := []any{"raw"}
+		args := []any{"provider_event"}
 		placeholders := make([]string, out.Rows)
 		for i, id := range out.IDs {
 			args = append(args, strconv.FormatInt(id, 10))
@@ -285,7 +285,7 @@ func TestClosedCandidateNormalMaintenanceWindows(t *testing.T) {
 			t.Fatal("normal_window_bounds_open")
 		}
 		var low, high, mode int64
-		err = meta.QueryRow(`SELECT min(id),max(id) FROM conversation_provider_events`).Scan(&low, &high)
+		err = meta.QueryRow(`SELECT (SELECT id FROM conversation_provider_events ORDER BY id LIMIT 1),(SELECT id FROM conversation_provider_events ORDER BY id DESC LIMIT 1)`).Scan(&low, &high)
 		if err == nil {
 			err = meta.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode)
 		}
