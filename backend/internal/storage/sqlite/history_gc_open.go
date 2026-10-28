@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+ "strconv"
 	"syscall"
 
 	sqlitestore "github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
@@ -14,7 +15,7 @@ import (
 
 // OpenHistoryGCExisting never creates a database, runs migrations or starts AO.
 // The operator must hold the maintenance lock with the daemon stopped.
-func OpenHistoryGCExisting(ctx context.Context, dataDir string, device,inode uint64, apply bool) (*Store,error) {
+func OpenHistoryGCExisting(ctx context.Context, dataDir string, device,inode uint64, apply bool, offlineCacheMiB ...int) (*Store,error) {
 	path:=filepath.Join(dataDir,"ao.db")
 	before,err:=os.Lstat(path);if err!=nil{return nil,err}
 	st,ok:=before.Sys().(*syscall.Stat_t)
@@ -26,6 +27,7 @@ func OpenHistoryGCExisting(ctx context.Context, dataDir string, device,inode uin
 	if err==nil{err=check.QueryRowContext(ctx,`PRAGMA auto_vacuum`).Scan(&auto)}
 	check.Close();if err!=nil{return nil,err};if version!=192 || auto!=2{return nil,errors.New("gc_requires_schema192_incremental")}
 	mode:="ro";pragma:="&_pragma=query_only(1)";if apply{mode="rw";pragma="&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=wal_autocheckpoint(1000)"}
+	if len(offlineCacheMiB)>1{return nil,errors.New("invalid_offline_cache")};if len(offlineCacheMiB)==1{cache:=offlineCacheMiB[0];if cache<1||cache>1024{return nil,errors.New("invalid_offline_cache")};if apply{pragma+="&_pragma=cache_size(-"+strconv.Itoa(cache*1024)+")"}}
 	dsn:=u.String()+"?mode="+mode+"&_pragma=busy_timeout(0)"+pragma
 	w,err:=sql.Open("sqlite",dsn);if err!=nil{return nil,err};w.SetMaxOpenConns(1);w.SetMaxIdleConns(1)
 	if err=w.PingContext(ctx);err!=nil{w.Close();return nil,err}
