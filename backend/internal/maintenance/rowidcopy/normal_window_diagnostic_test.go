@@ -32,10 +32,10 @@ type normalWindowInput struct {
 	Cursor    int64   `json:"-"`
 	IDHash    string  `json:"id_sha256"`
 	SizeHash  string  `json:"size_sha256"`
-	Rows      int    `json:"rows"`
-	Payload   int64  `json:"payload_column_bytes"`
-	AuditRows int64  `json:"raw_sidecar_rows"`
-	AuditText int64  `json:"raw_sidecar_text_bytes"`
+	Rows      int     `json:"rows"`
+	Payload   int64   `json:"payload_column_bytes"`
+	AuditRows int64   `json:"raw_sidecar_rows"`
+	AuditText int64   `json:"raw_sidecar_text_bytes"`
 }
 
 func normalMetadata(ctx context.Context, path string, cursor int64, limit int) (normalWindowInput, error) {
@@ -93,33 +93,33 @@ func normalMetadata(ctx context.Context, path string, cursor int64, limit int) (
 }
 
 type normalWindowResult struct {
-	Name                  string           `json:"name"`
-	BatchRows             int              `json:"batch_rows"`
-	Input                 normalWindowInput `json:"input"`
-	Status                string           `json:"status"`
-	Requests              int              `json:"requests"`
-	ConfirmedRequests     int              `json:"confirmed_requests"`
-	Scanned               int              `json:"confirmed_scanned"`
-	Compacted             int              `json:"confirmed_compacted"`
-	Audited               int              `json:"confirmed_audited"`
-	Markers               int64            `json:"confirmed_sidecar_insertions"`
-	LogicalBytes          int64            `json:"confirmed_logical_bytes_delta"`
-	Retained              map[string]int   `json:"confirmed_retained"`
-	ErrorType             string           `json:"error_enum,omitempty"`
-	Phase                 string           `json:"server_phase,omitempty"`
-	CommitState           string           `json:"failed_commit_state,omitempty"`
-	Timeouts              int              `json:"timeouts"`
-	UnknownRequests       int              `json:"unknown_effect_requests"`
-	UnconfirmedScanned    int              `json:"failed_result_scanned_not_counted"`
-	ReadMS                float64          `json:"read_ms"`
-	HeldMS                float64          `json:"held_ms"`
-	ReservedMS            float64          `json:"writer_reserved_ms"`
-	MaxHeldMS             float64          `json:"max_held_ms"`
-	MaxReservedMS         float64          `json:"max_writer_reserved_ms"`
-	CallWallMS            float64          `json:"application_call_wall_ms"`
-	ElapsedSeconds        float64          `json:"window_elapsed_seconds_including_yield"`
-	RowsPerSecond         float64          `json:"confirmed_rows_per_second"`
-	After                 normalWindowInput `json:"after"`
+	Name               string            `json:"name"`
+	BatchRows          int               `json:"batch_rows"`
+	Input              normalWindowInput `json:"input"`
+	Status             string            `json:"status"`
+	Requests           int               `json:"requests"`
+	ConfirmedRequests  int               `json:"confirmed_requests"`
+	Scanned            int               `json:"confirmed_scanned"`
+	Compacted          int               `json:"confirmed_compacted"`
+	Audited            int               `json:"confirmed_audited"`
+	Markers            int64             `json:"confirmed_sidecar_insertions"`
+	LogicalBytes       int64             `json:"confirmed_logical_bytes_delta"`
+	Retained           map[string]int    `json:"confirmed_retained"`
+	ErrorType          string            `json:"error_enum,omitempty"`
+	Phase              string            `json:"server_phase,omitempty"`
+	CommitState        string            `json:"failed_commit_state,omitempty"`
+	Timeouts           int               `json:"timeouts"`
+	UnknownRequests    int               `json:"unknown_effect_requests"`
+	UnconfirmedScanned int               `json:"failed_result_scanned_not_counted"`
+	ReadMS             float64           `json:"read_ms"`
+	HeldMS             float64           `json:"held_ms"`
+	ReservedMS         float64           `json:"writer_reserved_ms"`
+	MaxHeldMS          float64           `json:"max_held_ms"`
+	MaxReservedMS      float64           `json:"max_writer_reserved_ms"`
+	CallWallMS         float64           `json:"application_call_wall_ms"`
+	ElapsedSeconds     float64           `json:"window_elapsed_seconds_including_yield"`
+	RowsPerSecond      float64           `json:"confirmed_rows_per_second"`
+	After              normalWindowInput `json:"after"`
 }
 
 type normalBatchCall func(context.Context, store.HistoryMaintenanceRequest, store.HistoryMaintenanceOptions) (store.HistoryMaintenanceResult, error)
@@ -294,7 +294,10 @@ func TestClosedCandidateNormalMaintenanceWindows(t *testing.T) {
 			s.Close()
 			t.Fatal("normal_window_bounds_or_mode")
 		}
-		windows := []struct { name string; cursor int64 }{{"first", low - 1}, {"body_early", 200000}, {"middle", low + (high-low)/2}}
+		windows := []struct {
+			name   string
+			cursor int64
+		}{{"first", low - 1}, {"body_early", 200000}, {"middle", low + (high-low)/2}}
 		for _, window := range windows {
 			input, err := normalMetadata(context.Background(), path, window.cursor, normalWindowRows)
 			if err != nil {
@@ -323,7 +326,7 @@ func TestClosedCandidateNormalMaintenanceWindows(t *testing.T) {
 	}
 	value := map[string]any{"status": "normal_window_diagnostic_finished", "source_sha256": sha,
 		"normal_entry_point": "Store.MaintainHistoryBatch", "snapshot_entry_used": false,
-		"read_budget_ns": int64(options.ReadBudget), "write_budget_ns": int64(options.WriteBudget), "request_parent_budget_ns": int64(options.ReadBudget+options.WriteBudget),
+		"read_budget_ns": int64(options.ReadBudget), "write_budget_ns": int64(options.WriteBudget), "request_parent_budget_ns": int64(options.ReadBudget + options.WriteBudget),
 		"yield_ns": int64(normalWindowYield), "case_wall_budget_seconds": 45, "cutoff": cutoff,
 		"source_copies": 2, "max_rows_per_trial": 3000, "setup": setups, "windows": results,
 		"same_input_complete_body_case_pairs": comparable, "sample_sufficient_for_ordinary_window_comparison": comparable > 0,
@@ -339,7 +342,9 @@ func TestNormalWindowKnownAndUnknownFailurePreserveConfirmedPrefix(t *testing.T)
 	for _, state := range []string{"not_started", "unknown", "committed"} {
 		t.Run(state, func(t *testing.T) {
 			ids := make([]int64, 12)
-			for i := range ids { ids[i] = int64(i + 1) }
+			for i := range ids {
+				ids[i] = int64(i + 1)
+			}
 			input := normalWindowInput{Rows: len(ids), IDs: ids}
 			calls := 0
 			fn := func(ctx context.Context, req store.HistoryMaintenanceRequest, o store.HistoryMaintenanceOptions) (store.HistoryMaintenanceResult, error) {
@@ -348,7 +353,9 @@ func TestNormalWindowKnownAndUnknownFailurePreserveConfirmedPrefix(t *testing.T)
 				if !ok || time.Until(deadline) > 2250*time.Millisecond || req.ReadBudgetNS != int64(2*time.Second) || req.WriteBudgetNS != int64(250*time.Millisecond) {
 					t.Fatal("normal_window_request_budget_changed")
 				}
-				if calls == 1 { return store.HistoryMaintenanceResult{Status: "ok", Stage: "raw", CommitState: "committed", Committed: true, Scanned: 10, Compacted: 10, NextCursor: "10"}, nil }
+				if calls == 1 {
+					return store.HistoryMaintenanceResult{Status: "ok", Stage: "raw", CommitState: "committed", Committed: true, Scanned: 10, Compacted: 10, NextCursor: "10"}, nil
+				}
 				return store.HistoryMaintenanceResult{Status: "failed", CommitState: state, Scanned: 2, Phase: "writer_commit", ErrorType: "deadline_exceeded", WriterReservedMS: 300.1}, context.DeadlineExceeded
 			}
 			out := normalWindow(context.Background(), fn, input, store.HistoryMaintenanceRequest{Stage: "raw", BatchRows: 10}, store.DefaultHistoryMaintenanceOptions(), 5*time.Second)
@@ -366,55 +373,84 @@ func TestNormalWindowInvalidResultAndSampleStayUnproven(t *testing.T) {
 			fn := func(context.Context, store.HistoryMaintenanceRequest, store.HistoryMaintenanceOptions) (store.HistoryMaintenanceResult, error) {
 				calls++
 				r := store.HistoryMaintenanceResult{Status: "ok", Stage: "raw", CommitState: "committed", Committed: true, Scanned: 1, NextCursor: "private-not-a-cursor"}
-				if kind == "count" { r.Scanned = 1001 }
-				if kind == "metrics" { r.HeldMS = math.NaN() }
+				if kind == "count" {
+					r.Scanned = 1001
+				}
+				if kind == "metrics" {
+					r.HeldMS = math.NaN()
+				}
 				return r, nil
 			}
 			out := normalWindow(context.Background(), fn, normalWindowInput{Rows: 1, IDs: []int64{1}}, store.HistoryMaintenanceRequest{Stage: "raw", BatchRows: 10}, store.DefaultHistoryMaintenanceOptions(), 5*time.Second)
-			if calls != 1 || out.Scanned != 0 || out.UnknownRequests != 1 || normalComparable(out, out) { t.Fatal("invalid_window_result_confirmed") }
-			if _, err := json.Marshal(out); err != nil { t.Fatal("unsafe_window_metric_serialized") }
+			if calls != 1 || out.Scanned != 0 || out.UnknownRequests != 1 || normalComparable(out, out) {
+				t.Fatal("invalid_window_result_confirmed")
+			}
+			if _, err := json.Marshal(out); err != nil {
+				t.Fatal("unsafe_window_metric_serialized")
+			}
 		})
 	}
 	a := normalWindowResult{Status: "window_complete", Input: normalWindowInput{Rows: 1, IDHash: "same", SizeHash: "same"}}
-	if normalComparable(a, a) { t.Fatal("no_body_sample_claimed_sufficient") }
+	if normalComparable(a, a) {
+		t.Fatal("no_body_sample_claimed_sufficient")
+	}
 	a.Compacted = 1
-	b := a; b.Input.SizeHash = "other"
-	if normalComparable(a, b) || !normalComparable(a, a) { t.Fatal("different_window_inputs_compared") }
+	b := a
+	b.Input.SizeHash = "other"
+	if normalComparable(a, b) || !normalComparable(a, a) {
+		t.Fatal("different_window_inputs_compared")
+	}
 }
 
 func TestNormalWindowUsesCurrentApplicationEligibility(t *testing.T) {
 	// This is a newly created synthetic fixture, never a historical input.
 	source := nonemptyBootSource(t)
 	path := filepath.Join(filepath.Dir(source), "ao.db")
-	if os.Rename(source, path) != nil { t.Fatal("normal_fixture_rename") }
+	if os.Rename(source, path) != nil {
+		t.Fatal("normal_fixture_rename")
+	}
 	db, err := sql.Open("sqlite", path)
-	if err != nil { t.Fatal("normal_fixture_open") }
+	if err != nil {
+		t.Fatal("normal_fixture_open")
+	}
 	defer db.Close()
-	old := time.Now().UTC().Add(-72*time.Hour).Format(time.RFC3339Nano)
-	if _, err = db.Exec(`UPDATE conversation_turns SET state='completed',completed_at=?;`, old); err != nil { t.Fatal("normal_fixture_turn") }
+	old := time.Now().UTC().Add(-72 * time.Hour).Format(time.RFC3339Nano)
+	if _, err = db.Exec(`UPDATE conversation_turns SET state='completed',completed_at=?;`, old); err != nil {
+		t.Fatal("normal_fixture_turn")
+	}
 	for i := 0; i < 12; i++ {
-		if _, err = db.Exec(`INSERT INTO conversation_provider_events(conversation_id,session_id,method,payload_json,received_at) VALUES('closed-conv','closed-1','item.completed',?,?)`, `{"text":"`+strings.Repeat("synthetic ", 100)+`"}`, old); err != nil { t.Fatal("normal_fixture_raw") }
+		if _, err = db.Exec(`INSERT INTO conversation_provider_events(conversation_id,session_id,method,payload_json,received_at) VALUES('closed-conv','closed-1','item.completed',?,?)`, `{"text":"`+strings.Repeat("synthetic ", 100)+`"}`, old); err != nil {
+			t.Fatal("normal_fixture_raw")
+		}
 	}
 	s, err := aosqlite.Open(filepath.Dir(path))
-	if err != nil { t.Fatal("normal_fixture_store") }
+	if err != nil {
+		t.Fatal("normal_fixture_store")
+	}
 	defer s.Close()
 	info, err := os.Stat(path)
-	if err != nil { t.Fatal("normal_fixture_stat") }
+	if err != nil {
+		t.Fatal("normal_fixture_stat")
+	}
 	id := candidateToken(info)
 	input, err := normalMetadata(context.Background(), path, 0, 12)
-	if err != nil || input.Rows != 12 { t.Fatal("normal_fixture_metadata") }
+	if err != nil || input.Rows != 12 {
+		t.Fatal("normal_fixture_metadata")
+	}
 	calls := 0
 	call := func(ctx context.Context, req store.HistoryMaintenanceRequest, options store.HistoryMaintenanceOptions) (store.HistoryMaintenanceResult, error) {
 		calls++
 		if calls == 2 {
 			// The next NORMAL request must observe new owner facts; a cached
 			// snapshot would wrongly compact these remaining two bodies.
-			if _, err := db.Exec(`UPDATE sessions SET is_terminated=0 WHERE id='closed-1'`); err != nil { t.Fatal("normal_fixture_owner_change") }
+			if _, err := db.Exec(`UPDATE sessions SET is_terminated=0 WHERE id='closed-1'`); err != nil {
+				t.Fatal("normal_fixture_owner_change")
+			}
 		}
 		return s.MaintainHistoryBatch(ctx, req, options)
 	}
 	opts := store.DefaultHistoryMaintenanceOptions()
-	req := store.HistoryMaintenanceRequest{Stage:"raw", BatchRows:10, DatabaseDevice:id[0], DatabaseInode:id[1], Cutoff:time.Now().UTC().Add(-opts.Retention-time.Second).Format(time.RFC3339Nano)}
+	req := store.HistoryMaintenanceRequest{Stage: "raw", BatchRows: 10, DatabaseDevice: id[0], DatabaseInode: id[1], Cutoff: time.Now().UTC().Add(-opts.Retention - time.Second).Format(time.RFC3339Nano)}
 	out := normalWindow(context.Background(), call, input, req, opts, 5*time.Second)
 	after, err := normalMetadata(context.Background(), path, 0, 12)
 	if err != nil || calls != 2 || out.Status != "window_complete" || out.Scanned != 12 || out.Compacted != 10 || out.Retained["raw_turn_unattributed"] != 2 || out.Markers != 0 || input.Payload-after.Payload != out.LogicalBytes || out.LogicalBytes <= 0 {
