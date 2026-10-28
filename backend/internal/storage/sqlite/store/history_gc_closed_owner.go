@@ -125,6 +125,8 @@ func applyClosedHistory(ctx context.Context,tx *sql.Tx,p maintenancePrepared,sta
  proof,e:=closedHistoryOwner(ctx,tx,row.text("conversation_id"),cutoff,r.closedHistoryWriter);if e!=nil{return false,e};if !proof.allowed{r.Retained[proof.reason]++;return true,nil}
  conv:=row.text("conversation_id");kind:="provider_event";table:="conversation_provider_events"
  if stage=="gc:closed-raw"{
+  if row.text("session_id")==""{r.Retained["closed_raw_missing_row_owner"]++;return true,nil}
+  sourceOwner,e:=closedHistorySessionProof(ctx,tx,row.text("session_id"),r.closedHistoryWriter);if e!=nil{return false,e};if !sourceOwner.allowed{r.Retained[sourceOwner.reason]++;return true,nil}
   if reason:=historyBodyCoverageReason(ctx,row,"gc:raw");reason!=""{r.Retained[reason]++;return true,nil}
   old,e:=maintenanceOld(row.text("received_at"),cutoff,true);if e!=nil||!old{r.Retained["closed_raw_recent_or_unknown"]++;return true,nil}
   method:=row.text("method");if method=="queue.preserved_recovered"||method=="turn.transport_recovered"||strings.HasPrefix(row.text("provider_event_id"),"live-turn-recovery:")||strings.HasPrefix(row.text("provider_event_id"),"preserved-queue-recovery:"){r.Retained["closed_raw_queue_recovery_proof"]++;return true,nil}

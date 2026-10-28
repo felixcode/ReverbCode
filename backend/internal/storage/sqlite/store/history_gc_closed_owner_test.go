@@ -87,3 +87,11 @@ func TestClosedOwnerGCReviewLifecycleDoesNotMakeSessionPermanentlyPending(t *tes
   f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=8`).Scan(&n);if (n==0)!=test.reviewDeleted{t.Fatalf("review proof wrong n%d result%+v",n,r)}
  })}
 }
+
+func TestClosedOwnerGCProtectsRowOwnerOutsideConversationBranchSet(t *testing.T){
+ f:=closedOwnerSeed(t);active,e:=f.s.CreateSession(context.Background(),sampleRecord("closed-owner"));if e!=nil{t.Fatal(e)}
+ if _,e=f.db.Exec(`UPDATE conversation_provider_events SET session_id=? WHERE id=1`,active.ID);e!=nil{t.Fatal(e)}
+ o:=adapter.DefaultHistoryMaintenanceOptions();o.ReadBudget=5*time.Second;o.WriteBudget=5*time.Second
+ r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),f.request("gc:closed-raw"),o,f.now);if e!=nil||r.Deleted!=2{t.Fatalf("cross-owner proof %+v %v",r,e)}
+ var n int;f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=1`).Scan(&n);if n!=1{t.Fatal("current owner's event removed")}
+}
