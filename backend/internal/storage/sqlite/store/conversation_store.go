@@ -2544,10 +2544,15 @@ func (s *Store) UpsertActivity(
 	q, unlock := s.conversationWriter(ctx)
 	defer unlock()
 
-	expired,expiryErr:=s.historyActivityGCReplayExpired(ctx,conversationID,providerTurnID,activity)
-    if expiryErr!=nil{return expiryErr};if expired{return nil}
+	expired, expiryErr := s.historyActivityGCReplayExpired(ctx, conversationID, providerTurnID, activity)
+	if expiryErr != nil {
+		return expiryErr
+	}
+	if expired {
+		return nil
+	}
 
-    detail := string(activity.Detail)
+	detail := string(activity.Detail)
 
 	if activity.ProviderItemID != "" {
 		_, err := q.SelectConversationActivityByProviderItem(ctx,

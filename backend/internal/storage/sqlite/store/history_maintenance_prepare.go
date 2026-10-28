@@ -14,10 +14,10 @@ import (
 // transformations and fingerprint/canonical hashing finish before writeMu is
 // requested. Only fixed metadata and exact source CAS run in the writer.
 type maintenanceRawProof struct {
-	native       string
-	hasBody      bool
-	hasRetention bool
- bodyOnlyMarkers bool
+	native          string
+	hasBody         bool
+	hasRetention    bool
+	bodyOnlyMarkers bool
 }
 type maintenanceAudit struct {
 	kind, id, conversation, semantic, prompt, originalSHA, at, cutoff, fields string
@@ -36,7 +36,7 @@ type maintenancePrepared struct {
 	audits        []maintenanceAudit
 	inlineExpired bool
 	noRawBody     bool
- bodyNoChange bool
+	bodyNoChange  bool
 	size          int64
 }
 
@@ -49,12 +49,14 @@ func prepareMaintenanceRaw(ctx context.Context, row maintenanceRow) (*maintenanc
 	if !ok {
 		return nil, maintenanceRetained("raw_not_object")
 	}
-	proof := &maintenanceRawProof{bodyOnlyMarkers:true}
+	proof := &maintenanceRawProof{bodyOnlyMarkers: true}
 	_, proof.hasRetention = obj["_retention"]
 	proof.native, _ = obj["providerTurnId"].(string)
 	for _, key := range maintenanceBodyKeys {
 		proof.hasBody = proof.hasBody || maintenanceTruthy(obj[key])
-        if maintenanceTruthy(obj[key])&&!historyBodyValueMarker(obj[key]){proof.bodyOnlyMarkers=false}
+		if maintenanceTruthy(obj[key]) && !historyBodyValueMarker(obj[key]) {
+			proof.bodyOnlyMarkers = false
+		}
 	}
 	return proof, nil
 }
@@ -114,9 +116,15 @@ func maintenanceBuiltinOriginal(ctx context.Context, db maintenanceDB, stage mai
 	return row, nil
 }
 func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage maintenanceStage, stageName, key string, ids []any, o HistoryMaintenanceOptions, now, cutoff time.Time, rawNoBodyFastPath ...bool) ([]maintenancePrepared, error) {
-	if stageName == "gc:raw" { return prepareHistoryGC(ctx, db, ids) }
- if stageName == "gc:activity" { return prepareHistoryGCActivities(ctx,db,ids) }
- if stageName == "gc:audit" { return prepareHistoryGCAudits(ctx,db,ids) }
+	if stageName == "gc:raw" {
+		return prepareHistoryGC(ctx, db, ids)
+	}
+	if stageName == "gc:activity" {
+		return prepareHistoryGCActivities(ctx, db, ids)
+	}
+	if stageName == "gc:audit" {
+		return prepareHistoryGCAudits(ctx, db, ids)
+	}
 	columns := stage.fields
 	var err error
 	if stage.builtin {
@@ -223,8 +231,18 @@ func prepareMaintenanceRows(ctx context.Context, db maintenanceDB, stage mainten
 			plans = append(plans, p)
 			continue
 		}
-		if err==nil && historyBodyAlreadyEmpty(p.row,stageName){p.bodyNoChange=true;plans=append(plans,p);continue}
-        if err==nil {if reason:=historyBodyCoverageReason(ctx,p.row,stageName);reason!=""{p.skip=reason;plans=append(plans,p);continue}}
+		if err == nil && historyBodyAlreadyEmpty(p.row, stageName) {
+			p.bodyNoChange = true
+			plans = append(plans, p)
+			continue
+		}
+		if err == nil {
+			if reason := historyBodyCoverageReason(ctx, p.row, stageName); reason != "" {
+				p.skip = reason
+				plans = append(plans, p)
+				continue
+			}
+		}
 		if err == nil {
 			var eligible bool
 			eligible, err = maintenanceEligibleWithProof(ctx, db, p.row, stageName, cutoff, p.proof)
@@ -307,9 +325,15 @@ func applyMaintenancePrepared(ctx context.Context, tx *sql.Tx, stage maintenance
 }
 
 func applyMaintenancePreparedWithEligibility(ctx context.Context, tx *sql.Tx, eligibility maintenanceDB, stage maintenanceStage, stageName, key string, p maintenancePrepared, cutoff, now time.Time, result *HistoryMaintenanceResult) (advanced bool, err error) {
-	if stageName == "gc:raw" { return applyHistoryGC(ctx, tx, p, cutoff, result) }
- if stageName == "gc:activity" { return applyHistoryGCActivity(ctx,tx,p,cutoff,result) }
- if stageName == "gc:audit" { return applyHistoryGCAudit(ctx,tx,p,cutoff,result) }
+	if stageName == "gc:raw" {
+		return applyHistoryGC(ctx, tx, p, cutoff, result)
+	}
+	if stageName == "gc:activity" {
+		return applyHistoryGCActivity(ctx, tx, p, cutoff, result)
+	}
+	if stageName == "gc:audit" {
+		return applyHistoryGCAudit(ctx, tx, p, cutoff, result)
+	}
 	if p.skip != "" {
 		if p.skip == "already_expired" {
 			marked, e := maintenanceExists(ctx, tx, `SELECT 1 FROM ao_history_retention WHERE object_kind=? AND object_id=?`, stage.kind, maintenanceID(p.id))
@@ -366,8 +390,14 @@ func applyMaintenancePreparedWithEligibility(ctx context.Context, tx *sql.Tx, el
 			result.Retained["concurrent_body_or_owner_change"]++
 			return false, nil
 		}
-		if p.bodyNoChange{result.Retained["body_already_empty_or_marker"]++;return true,nil}
-        if reason:=historyBodyCoverageReason(ctx,current,stageName);reason!=""{result.Retained[reason]++;return true,nil}
+		if p.bodyNoChange {
+			result.Retained["body_already_empty_or_marker"]++
+			return true, nil
+		}
+		if reason := historyBodyCoverageReason(ctx, current, stageName); reason != "" {
+			result.Retained[reason]++
+			return true, nil
+		}
 		if p.inlineExpired {
 			result.Retained["already_expired"]++
 			return true, nil

@@ -18,18 +18,18 @@ import (
 // HistoryMaintenanceRequest contains no SQL, predicates, replacement values or
 // original content. The daemon alone selects policy, bodies and transformations.
 type HistoryMaintenanceRequest struct {
- OfflineCoverageBefore time.Time `json:"-"`
- OfflineMaxEventID int64 `json:"-"`
-	Stage          string `json:"stage"`
-	Cursor         string `json:"cursor"`
-	Cutoff         string `json:"cutoff"`
-	DatabaseDevice uint64 `json:"database_device"`
-	DatabaseInode  uint64 `json:"database_inode"`
-	BatchRows      int    `json:"batch_rows,omitempty"`
-	BatchBytes     int64  `json:"batch_bytes,omitempty"`
-	MaxRowBytes    int64  `json:"max_row_bytes,omitempty"`
-	ReadBudgetNS   int64  `json:"read_budget_ns,omitempty"`
-	WriteBudgetNS  int64  `json:"write_budget_ns,omitempty"`
+	OfflineCoverageBefore time.Time `json:"-"`
+	OfflineMaxEventID     int64     `json:"-"`
+	Stage                 string    `json:"stage"`
+	Cursor                string    `json:"cursor"`
+	Cutoff                string    `json:"cutoff"`
+	DatabaseDevice        uint64    `json:"database_device"`
+	DatabaseInode         uint64    `json:"database_inode"`
+	BatchRows             int       `json:"batch_rows,omitempty"`
+	BatchBytes            int64     `json:"batch_bytes,omitempty"`
+	MaxRowBytes           int64     `json:"max_row_bytes,omitempty"`
+	ReadBudgetNS          int64     `json:"read_budget_ns,omitempty"`
+	WriteBudgetNS         int64     `json:"write_budget_ns,omitempty"`
 }
 type HistoryMaintenanceOptions struct {
 	Retention   time.Duration
@@ -84,8 +84,8 @@ type maintenanceStage struct {
 }
 
 var maintenanceStages = map[string]maintenanceStage{
- "gc:activity": {"conversation_activities","activity",nil,false},
- "gc:audit": {"ao_history_retention","",nil,false},
+	"gc:activity":                           {"conversation_activities", "activity", nil, false},
+	"gc:audit":                              {"ao_history_retention", "", nil, false},
 	"gc:raw":                                {"conversation_provider_events", "provider_event", nil, false},
 	"raw":                                   {"conversation_provider_events", "provider_event", []string{"payload_json"}, false},
 	"outputs":                               {"conversation_activities", "activity_output", []string{"command_output", "streamed_text"}, false},
@@ -113,7 +113,9 @@ func maintenanceRetain(result *HistoryMaintenanceResult, err error) bool {
 	return false
 }
 func maintenanceKey(ctx context.Context, db maintenanceDB, stage maintenanceStage) (string, bool, error) {
- if stage.table=="ao_history_retention" {return "",false,errors.New("audit_requires_composite_cursor")}
+	if stage.table == "ao_history_retention" {
+		return "", false, errors.New("audit_requires_composite_cursor")
+	}
 	if !stage.builtin {
 		return "id", stage.table == "conversation_provider_events", nil
 	}
@@ -165,7 +167,12 @@ func (s *Store) MaintainHistorySnapshotBatch(ctx context.Context, req HistoryMai
 	if asOf.IsZero() || asOf.After(time.Now().UTC()) {
 		return HistoryMaintenanceResult{Status: "failed", CommitState: "not_started", Stage: req.Stage, NextCursor: req.Cursor, Retained: map[string]int{}}, errors.New("invalid historical snapshot clock")
 	}
-	if !req.OfflineCoverageBefore.IsZero(){if req.OfflineMaxEventID<=0||req.OfflineCoverageBefore.After(asOf){return HistoryMaintenanceResult{},errors.New("invalid offline recovery coverage")};ctx=context.WithValue(ctx,historyBodyCoverageKey{},historyBodyCoverage{req.OfflineCoverageBefore,req.OfflineMaxEventID})}
+	if !req.OfflineCoverageBefore.IsZero() {
+		if req.OfflineMaxEventID <= 0 || req.OfflineCoverageBefore.After(asOf) {
+			return HistoryMaintenanceResult{}, errors.New("invalid offline recovery coverage")
+		}
+		ctx = context.WithValue(ctx, historyBodyCoverageKey{}, historyBodyCoverage{req.OfflineCoverageBefore, req.OfflineMaxEventID})
+	}
 	return s.maintainHistoryBatchAt(ctx, req, o, asOf.UTC(), true)
 }
 
@@ -206,7 +213,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		return result, errors.New("invalid request limits")
 	}
 	// GC reads/rechecks metadata only; its independent cap never enlarges body batches.
-	if strings.HasPrefix(req.Stage,"gc:") {
+	if strings.HasPrefix(req.Stage, "gc:") {
 		o.BatchRows = o.GCBatchRows
 	}
 	if req.BatchRows > 0 {
@@ -233,7 +240,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	if err != nil {
 		return result, err
 	}
-	if cutoff.After(now.Add(-o.Retention)) || strings.HasPrefix(req.Stage,"gc:") && cutoff.After(now.Add(-48*time.Hour)) {
+	if cutoff.After(now.Add(-o.Retention)) || strings.HasPrefix(req.Stage, "gc:") && cutoff.After(now.Add(-48*time.Hour)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
 	// Separate, non-queued admission bounds all reader/CPU preparation memory.
@@ -269,52 +276,54 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			return
 		}
 		defer readTx.Rollback()
-        var ids []any
-        if req.Stage=="gc:audit" {
-            result.Phase="read_candidates"
-            ids,err=historyGCAuditKeys(readCtx,readTx,req.Cursor,o.BatchRows)
-            if err!=nil{return}
-        } else {
-		var numeric bool
-		key, numeric, err = maintenanceKey(readCtx, readTx, stage)
-		if err != nil {
-			return
-		}
-		cursor := any(req.Cursor)
-		if numeric {
-			if req.Cursor == "" {
-				cursor = int64(0)
-			} else {
-				var v int64
-				if _, err = fmt.Sscan(req.Cursor, &v); err != nil || fmt.Sprint(v) != req.Cursor {
-					err = errors.New("invalid numeric cursor")
-					return
+		var ids []any
+		if req.Stage == "gc:audit" {
+			result.Phase = "read_candidates"
+			ids, err = historyGCAuditKeys(readCtx, readTx, req.Cursor, o.BatchRows)
+			if err != nil {
+				return
+			}
+		} else {
+			var numeric bool
+			key, numeric, err = maintenanceKey(readCtx, readTx, stage)
+			if err != nil {
+				return
+			}
+			cursor := any(req.Cursor)
+			if numeric {
+				if req.Cursor == "" {
+					cursor = int64(0)
+				} else {
+					var v int64
+					if _, err = fmt.Sscan(req.Cursor, &v); err != nil || fmt.Sprint(v) != req.Cursor {
+						err = errors.New("invalid numeric cursor")
+						return
+					}
+					cursor = v
 				}
-				cursor = v
+			}
+			result.Phase = "read_candidates"
+			rows, e := readTx.QueryContext(readCtx, `SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>? ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`, cursor, o.BatchRows)
+			if e != nil {
+				err = e
+				return
+			}
+			ids = []any{}
+			for rows.Next() {
+				var id any
+				if err = rows.Scan(&id); err != nil {
+					break
+				}
+				ids = append(ids, id)
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			rows.Close()
+			if err != nil {
+				return
 			}
 		}
-		result.Phase = "read_candidates"
-		rows, e := readTx.QueryContext(readCtx, `SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>? ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`, cursor, o.BatchRows)
-		if e != nil {
-			err = e
-			return
-		}
-		ids = []any{}
-		for rows.Next() {
-			var id any
-			if err = rows.Scan(&id); err != nil {
-				break
-			}
-			ids = append(ids, id)
-		}
-		if err == nil {
-			err = rows.Err()
-		}
-		rows.Close()
-		if err != nil {
-			return
-		}
-        }
 		if len(ids) == 0 {
 			result.Complete = true
 			result.NextCursor = ""
