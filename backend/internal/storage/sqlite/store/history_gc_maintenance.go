@@ -28,7 +28,7 @@ func applyHistoryGC(ctx context.Context,tx *sql.Tx,p maintenancePrepared,cutoff 
  if row.text("provider_event_id")!=""{result.Retained["native_event_identity"]++;return true,nil}
  if !historyGCStreamMethod(row.text("method")){result.Retained["control_event"]++;return true,nil}
  if reason:=historyBodyCoverageReason(ctx,row,"gc:raw");reason!=""{result.Retained[reason]++;return true,nil}
- reason,e:=historyGCEligible(ctx,tx,historyGCRow{conversation:row.text("conversation_id"),received:row.text("received_at")},HistoryGCOptions{Cutoff:cutoff},map[string]historyGCProtection{})
+ reason,e:=historyGCEligible(ctx,tx,historyGCRow{conversation:row.text("conversation_id"),received:row.text("received_at")},HistoryGCOptions{Cutoff:cutoff},result.rawCacheWriterProtection())
  if e!=nil{return false,e};if reason!=""{result.Retained[reason]++;return true,nil}
  // Both deletes are part of the existing maintenance transaction. This emits
  // aggregate counts, never an audit record for each deleted debug event.
