@@ -34,6 +34,7 @@ type HistoryMaintenanceRequest struct {
 type HistoryMaintenanceOptions struct {
 	Retention   time.Duration
  RawCacheRetention time.Duration
+ RawCacheBatchRows int
 	BatchRows   int
 	GCBatchRows int
 	BatchBytes  int64
@@ -43,10 +44,10 @@ type HistoryMaintenanceOptions struct {
 }
 
 func DefaultHistoryMaintenanceOptions() HistoryMaintenanceOptions {
-	return HistoryMaintenanceOptions{Retention: 47 * time.Hour, RawCacheRetention:6*time.Hour, BatchRows: 100, GCBatchRows: 250, BatchBytes: 16 << 20, MaxRowBytes: 8 << 20, ReadBudget: 2 * time.Second, WriteBudget: 250 * time.Millisecond}
+	return HistoryMaintenanceOptions{Retention: 47 * time.Hour, RawCacheRetention:6*time.Hour, RawCacheBatchRows:125, BatchRows: 100, GCBatchRows: 250, BatchBytes: 16 << 20, MaxRowBytes: 8 << 20, ReadBudget: 2 * time.Second, WriteBudget: 250 * time.Millisecond}
 }
 func (o HistoryMaintenanceOptions) Validate() error {
-	if o.RawCacheRetention<0 || o.RawCacheRetention>48*time.Hour || o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.GCBatchRows <= 0 || o.GCBatchRows > 1000 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
+	if o.RawCacheBatchRows<0 || o.RawCacheBatchRows>1000 || o.RawCacheRetention<0 || o.RawCacheRetention>48*time.Hour || o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.GCBatchRows <= 0 || o.GCBatchRows > 1000 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
 		return errors.New("invalid maintenance settings")
 	}
 	return nil
@@ -207,9 +208,10 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		return result, errors.New("invalid request limits")
 	}
 	// GC reads/rechecks metadata only; its independent cap never enlarges body batches.
-	if req.Stage == "gc:raw" {
+	if strings.HasPrefix(req.Stage,"gc:") {
 		o.BatchRows = o.GCBatchRows
 	}
+ if req.Stage=="cache:raw" {o.BatchRows=o.RawCacheBatchRows;if o.BatchRows==0{o.BatchRows=125}}
 	if req.BatchRows > 0 {
 		o.BatchRows = min(o.BatchRows, req.BatchRows)
 	}

@@ -164,6 +164,7 @@ func StartWithPageReclaim(path string, s *store.Store, o store.HistoryMaintenanc
 		cap["maintenanceProtocol"] = 1
 		cap["pid"] = os.Getpid()
 		cap["retentionHours"] = o.Retention.Hours()
+ cap["rawCacheRetentionHours"] = o.RawCacheRetention.Hours()
 		cap["writeBudgetMS"] = o.WriteBudget.Milliseconds()
 		if reclaim == nil {
 			cap["pageReclaim"] = map[string]any{"configured": false, "supported": false, "reason": "invalid_reclaim_configuration"}
@@ -242,14 +243,14 @@ func StartConfigured(s *store.Store) (*Server, error) {
 		return nil, nil
 	}
 	o := store.DefaultHistoryMaintenanceOptions()
-	for name, dst := range map[string]*time.Duration{"RETENTION_HOURS": &o.Retention, "STATEMENT_SECONDS": &o.ReadBudget, "TRANSACTION_SECONDS": &o.WriteBudget} {
+	for name, dst := range map[string]*time.Duration{"RETENTION_HOURS": &o.Retention, "RAW_CACHE_RETENTION_HOURS": &o.RawCacheRetention, "STATEMENT_SECONDS": &o.ReadBudget, "TRANSACTION_SECONDS": &o.WriteBudget} {
 		if raw := os.Getenv("ALBANIA_AO_HISTORY_" + name); raw != "" {
 			v, e := strconv.ParseFloat(raw, 64)
 			if e != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > float64(1<<30) {
 				return nil, errors.New("invalid maintenance duration")
 			}
 			unit := time.Second
-			if name == "RETENTION_HOURS" {
+			if name == "RETENTION_HOURS" || name=="RAW_CACHE_RETENTION_HOURS" {
 				unit = time.Hour
 			}
 			if v > float64(math.MaxInt64)/float64(unit) {
@@ -281,6 +282,7 @@ func StartConfigured(s *store.Store) (*Server, error) {
 		}
 		o.GCBatchRows = n
 	}
+ if raw:=os.Getenv("ALBANIA_AO_HISTORY_RAW_CACHE_BATCH_ROWS");raw!="" {n,e:=strconv.Atoi(raw);if e!=nil||n<1||n>1000{return nil,errors.New("invalid raw cache rows")};o.RawCacheBatchRows=n}
 	reclaim, reclaimErr := configuredPageReclaimOptions(o)
 	if reclaimErr != nil {
 		return StartWithPageReclaim(path, s, o, nil)
