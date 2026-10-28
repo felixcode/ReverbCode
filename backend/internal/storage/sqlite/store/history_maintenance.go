@@ -84,6 +84,8 @@ type maintenanceStage struct {
 }
 
 var maintenanceStages = map[string]maintenanceStage{
+ "gc:activity": {"conversation_activities","activity",nil,false},
+ "gc:audit": {"ao_history_retention","",nil,false},
 	"gc:raw":                                {"conversation_provider_events", "provider_event", nil, false},
 	"raw":                                   {"conversation_provider_events", "provider_event", []string{"payload_json"}, false},
 	"outputs":                               {"conversation_activities", "activity_output", []string{"command_output", "streamed_text"}, false},
@@ -111,6 +113,7 @@ func maintenanceRetain(result *HistoryMaintenanceResult, err error) bool {
 	return false
 }
 func maintenanceKey(ctx context.Context, db maintenanceDB, stage maintenanceStage) (string, bool, error) {
+ if stage.table=="ao_history_retention" {return "rowid",true,nil}
 	if !stage.builtin {
 		return "id", stage.table == "conversation_provider_events", nil
 	}
@@ -203,7 +206,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		return result, errors.New("invalid request limits")
 	}
 	// GC reads/rechecks metadata only; its independent cap never enlarges body batches.
-	if req.Stage == "gc:raw" {
+	if strings.HasPrefix(req.Stage,"gc:") {
 		o.BatchRows = o.GCBatchRows
 	}
 	if req.BatchRows > 0 {
@@ -230,7 +233,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	if err != nil {
 		return result, err
 	}
-	if cutoff.After(now.Add(-o.Retention)) || req.Stage == "gc:raw" && cutoff.After(now.Add(-48*time.Hour)) {
+	if cutoff.After(now.Add(-o.Retention)) || strings.HasPrefix(req.Stage,"gc:") && cutoff.After(now.Add(-48*time.Hour)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
 	// Separate, non-queued admission bounds all reader/CPU preparation memory.
