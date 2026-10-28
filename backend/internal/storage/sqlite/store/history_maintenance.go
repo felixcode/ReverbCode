@@ -118,7 +118,7 @@ func maintenanceRetain(result *HistoryMaintenanceResult, err error) bool {
 	return false
 }
 func maintenanceKey(ctx context.Context, db maintenanceDB, stage maintenanceStage) (string, bool, error) {
- if stage.table=="ao_history_retention" {return "rowid",true,nil}
+ if stage.table=="ao_history_retention" {return "",false,errors.New("audit_requires_composite_cursor")}
 	if !stage.builtin {
 		return "id", stage.table == "conversation_provider_events", nil
 	}
@@ -276,6 +276,12 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			return
 		}
 		defer readTx.Rollback()
+        var ids []any
+        if req.Stage=="gc:audit" {
+            result.Phase="read_candidates"
+            ids,err=historyGCAuditKeys(readCtx,readTx,req.Cursor,o.BatchRows)
+            if err!=nil{return}
+        } else {
 		var numeric bool
 		key, numeric, err = maintenanceKey(readCtx, readTx, stage)
 		if err != nil {
@@ -300,7 +306,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			err = e
 			return
 		}
-		ids := []any{}
+		ids = []any{}
 		for rows.Next() {
 			var id any
 			if err = rows.Scan(&id); err != nil {
@@ -315,6 +321,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		if err != nil {
 			return
 		}
+        }
 		if len(ids) == 0 {
 			result.Complete = true
 			result.NextCursor = ""
