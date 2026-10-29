@@ -165,6 +165,7 @@ func StartWithPageReclaim(path string, s *store.Store, o store.HistoryMaintenanc
 		cap["pid"] = os.Getpid()
 		cap["retentionHours"] = o.Retention.Hours()
  cap["rawCacheRetentionHours"] = o.RawCacheRetention.Hours()
+ cap["closedOwnerRetentionHours"]=o.ClosedOwnerRetention.Hours();if o.ClosedOwnerRetention==0{cap["closedOwnerRetentionHours"]=float64(48)}
  cap["closedOwnerGC"] = s.ClosedOwnerMaintenanceConfigured()
 		cap["writeBudgetMS"] = o.WriteBudget.Milliseconds()
 		if reclaim == nil {
@@ -244,7 +245,7 @@ func StartConfigured(s *store.Store) (*Server, error) {
 		return nil, nil
 	}
 	o := store.DefaultHistoryMaintenanceOptions()
-	for name, dst := range map[string]*time.Duration{"RETENTION_HOURS": &o.Retention, "RAW_CACHE_RETENTION_HOURS": &o.RawCacheRetention, "STATEMENT_SECONDS": &o.ReadBudget, "TRANSACTION_SECONDS": &o.WriteBudget} {
+	for name, dst := range map[string]*time.Duration{"RETENTION_HOURS": &o.Retention, "RAW_CACHE_RETENTION_HOURS": &o.RawCacheRetention, "CLOSED_OWNER_RETENTION_HOURS": &o.ClosedOwnerRetention, "STATEMENT_SECONDS": &o.ReadBudget, "TRANSACTION_SECONDS": &o.WriteBudget} {
 		if raw := os.Getenv("ALBANIA_AO_HISTORY_" + name); raw != "" {
 			v, e := strconv.ParseFloat(raw, 64)
 			if e != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > float64(1<<30) {

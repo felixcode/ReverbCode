@@ -33,6 +33,7 @@ type HistoryMaintenanceRequest struct {
 }
 type HistoryMaintenanceOptions struct {
 	Retention   time.Duration
+ ClosedOwnerRetention time.Duration
  RawCacheRetention time.Duration
  RawCacheBatchRows int
 	BatchRows   int
@@ -44,16 +45,17 @@ type HistoryMaintenanceOptions struct {
 }
 
 func DefaultHistoryMaintenanceOptions() HistoryMaintenanceOptions {
-	return HistoryMaintenanceOptions{Retention: 47 * time.Hour, RawCacheRetention:6*time.Hour, RawCacheBatchRows:125, BatchRows: 100, GCBatchRows: 250, BatchBytes: 16 << 20, MaxRowBytes: 8 << 20, ReadBudget: 2 * time.Second, WriteBudget: 250 * time.Millisecond}
+	return HistoryMaintenanceOptions{Retention: 47 * time.Hour, ClosedOwnerRetention:48*time.Hour, RawCacheRetention:6*time.Hour, RawCacheBatchRows:125, BatchRows: 100, GCBatchRows: 250, BatchBytes: 16 << 20, MaxRowBytes: 8 << 20, ReadBudget: 2 * time.Second, WriteBudget: 250 * time.Millisecond}
 }
 func (o HistoryMaintenanceOptions) Validate() error {
-	if o.RawCacheBatchRows<0 || o.RawCacheBatchRows>1000 || o.RawCacheRetention<0 || o.RawCacheRetention>48*time.Hour || o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.GCBatchRows <= 0 || o.GCBatchRows > 1000 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
+	if o.ClosedOwnerRetention<0 || o.ClosedOwnerRetention>48*time.Hour || o.RawCacheBatchRows<0 || o.RawCacheBatchRows>1000 || o.RawCacheRetention<0 || o.RawCacheRetention>48*time.Hour || o.Retention <= 0 || o.Retention > 48*time.Hour || o.BatchRows <= 0 || o.GCBatchRows <= 0 || o.GCBatchRows > 1000 || o.BatchBytes <= 0 || o.MaxRowBytes <= 0 || o.ReadBudget <= 0 || o.WriteBudget <= 0 {
 		return errors.New("invalid maintenance settings")
 	}
 	return nil
 }
 
 type HistoryMaintenanceResult struct {
+ OldestEligibleAt string `json:"oldest_eligible_at,omitempty"`
  closedHistoryWriter *closedHistoryCache
  rawCacheSchemaChecked bool
  rawCacheProtection map[string]historyGCProtection
@@ -199,6 +201,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			result.Committed = false
 			result.Compacted = 0
 			result.Deleted = 0
+            result.OldestEligibleAt=""
 			result.AuditDeleted = 0
 			result.Audited = 0
 			result.Markers = 0
@@ -244,7 +247,9 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 		return result, err
 	}
 	retention:=o.Retention;if req.Stage=="cache:raw"{retention=o.RawCacheRetention;if retention==0{retention=6*time.Hour}}
-	if cutoff.After(now.Add(-retention)) || strings.HasPrefix(req.Stage,"gc:") && cutoff.After(now.Add(-48*time.Hour)) {
+	gcRetention:=48*time.Hour
+ if req.Stage=="gc:closed-raw"||req.Stage=="gc:closed-activity" {if o.ClosedOwnerRetention>0{gcRetention=o.ClosedOwnerRetention};retention=gcRetention}
+ if cutoff.After(now.Add(-retention)) || strings.HasPrefix(req.Stage,"gc:") && cutoff.After(now.Add(-gcRetention)) {
 		return result, errors.New("maintenance cutoff is too recent")
 	}
 	// Separate, non-queued admission bounds all reader/CPU preparation memory.

@@ -50,7 +50,7 @@ func TestClosedOwnerGCRequiresOfflineProofAndFreshClosedCheckpoint(t *testing.T)
 func TestClosedOwnerGCAuditAndSourceRollbackIsAtomic(t *testing.T){
  f:=closedOwnerSeed(t);if _,e:=f.db.Exec(`CREATE TRIGGER reject_closed BEFORE DELETE ON conversation_provider_events BEGIN SELECT RAISE(ABORT,'synthetic');END`);e!=nil{t.Fatal(e)}
  o:=adapter.DefaultHistoryMaintenanceOptions();o.ReadBudget=5*time.Second;o.WriteBudget=5*time.Second
- r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),f.request("gc:closed-raw"),o,f.now);if e==nil||r.Deleted!=0||r.AuditDeleted!=0||r.NextCursor!=""{t.Fatalf("failed prefix advanced %+v %v",r,e)}
+ r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),f.request("gc:closed-raw"),o,f.now);if e==nil||r.Deleted!=0||r.AuditDeleted!=0||r.NextCursor!=""||r.OldestEligibleAt!=""{t.Fatalf("failed prefix advanced %+v %v",r,e)}
  var n int;f.db.QueryRow(`SELECT count(*) FROM ao_history_retention WHERE object_kind='provider_event' AND object_id='1'`).Scan(&n);if n!=1{t.Fatal("audit not restored")};f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=1`).Scan(&n);if n!=1{t.Fatal("row not restored")}
 }
 func TestClosedOwnerGCActivityKeepsSequenceWatermarkAndRecentMutableRows(t *testing.T){
@@ -95,4 +95,18 @@ func TestClosedOwnerGCProtectsRowOwnerOutsideConversationBranchSet(t *testing.T)
  o:=adapter.DefaultHistoryMaintenanceOptions();o.ReadBudget=5*time.Second;o.WriteBudget=5*time.Second
  r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),f.request("gc:closed-raw"),o,f.now);if e!=nil||r.Deleted!=2{t.Fatalf("cross-owner proof %+v %v",r,e)}
  var n int;f.db.QueryRow(`SELECT count(*) FROM conversation_provider_events WHERE id=1`).Scan(&n);if n!=1{t.Fatal("current owner's event removed")}
+}
+
+func TestClosedOwnerRetentionMarginOnlyChangesClosedStages(t *testing.T){
+ f:=closedOwnerSeed(t);stamp:=f.now.Add(-30*time.Hour).Format(time.RFC3339Nano)
+ if _,e:=f.db.Exec(`UPDATE conversation_provider_events SET received_at=?`,f.now.Format(time.RFC3339Nano));e!=nil{t.Fatal(e)}
+ if _,e:=f.db.Exec(`UPDATE conversation_provider_events SET received_at=? WHERE id=1`,stamp);e!=nil{t.Fatal(e)}
+ req:=f.request("gc:closed-raw");req.Cutoff=f.now.Add(-24*time.Hour).Format(time.RFC3339Nano)
+ o:=adapter.DefaultHistoryMaintenanceOptions();o.ReadBudget=5*time.Second;o.WriteBudget=5*time.Second
+ if _,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),req,o,f.now);e==nil{t.Fatal("default48h allowed24h cutoff")}
+ o.ClosedOwnerRetention=24*time.Hour
+ raw:=req;raw.Stage="gc:raw"
+ if _,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),raw,o,f.now);e==nil{t.Fatal("closed-only setting widened ordinary48h GC")}
+ r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),req,o,f.now);if e!=nil||r.Deleted!=1||r.OldestEligibleAt!=stamp{t.Fatalf("24h closed qualification %+v %v",r,e)}
+ var count int;f.db.QueryRow(`SELECT count(*) FROM conversation_messages WHERE id='original-input'`).Scan(&count);if count!=1{t.Fatal("input lost")}
 }

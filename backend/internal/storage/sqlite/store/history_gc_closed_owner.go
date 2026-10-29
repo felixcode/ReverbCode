@@ -148,5 +148,8 @@ func applyClosedHistory(ctx context.Context,tx *sql.Tx,p maintenancePrepared,sta
  if kind=="activity"{q=`DELETE FROM ao_history_retention WHERE object_kind IN ('activity','activity_output') AND object_id=? AND conversation_id=?`}
  a,e:=tx.ExecContext(ctx,q,maintenanceID(p.id),conv);if e!=nil{return false,e};n,e:=a.RowsAffected();if e!=nil{return false,e}
  d,e:=tx.ExecContext(ctx,`DELETE FROM "`+table+`" WHERE id=? AND conversation_id=?`,p.id,conv);if e!=nil{return false,e};count,e:=d.RowsAffected();if e!=nil{return false,e};if count!=1{return false,errors.New("closed_owner_delete_changed")}
+ stamp:=row.text("received_at");if stage=="gc:closed-activity"{stamp=row.text("updated_at");a,_:=maintenanceTime(row.text("created_at"));b,_:=maintenanceTime(stamp);if a.After(b){stamp=row.text("created_at")}}
+ observed,e:=maintenanceTime(stamp);if e!=nil{return false,e}
+ if previous,x:=maintenanceTime(r.OldestEligibleAt);x!=nil||observed.Before(previous){r.OldestEligibleAt=observed.UTC().Format(time.RFC3339Nano)}
  r.Deleted++;r.AuditDeleted+=int(n);return true,nil
 }
