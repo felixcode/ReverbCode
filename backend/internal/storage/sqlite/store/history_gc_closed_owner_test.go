@@ -115,17 +115,18 @@ func TestHistoryMaintenanceFinitePassBoundsDoNotChaseAppends(t *testing.T){
  f:=closedOwnerSeed(t);o:=adapter.DefaultHistoryMaintenanceOptions();o.ReadBudget=5*time.Second;o.WriteBudget=5*time.Second
  bounds,e:=f.s.HistoryMaintenancePassBounds(context.Background());if e!=nil||bounds["gc:raw"]!="10"{t.Fatal(bounds,e)}
  req:=f.request("gc:closed-raw");ceiling:=int64(3);req.EndEventID=&ceiling
- r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),req,o,f.now);if e!=nil||r.Scanned!=3||!r.Complete{t.Fatalf("bounded CPE %+v %v",r,e)}
- zero:=int64(0);req.EndEventID=&zero;r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),req,o,f.now);if e!=nil||r.Scanned!=0||!r.Complete{t.Fatal("empty bound",r,e)}
+ r,e:=f.s.MaintainHistorySnapshotBatch(context.Background(),req,o,f.now);if e!=nil||r.Scanned!=3||r.Complete{t.Fatalf("bounded CPE %+v %v",r,e)}
+ req.Cursor=r.NextCursor;r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),req,o,f.now);if e!=nil||r.Scanned!=0||!r.Complete{t.Fatal("event chased beyond bound",r,e)}
+ zero:=int64(0);req.Cursor="";req.EndEventID=&zero;r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),req,o,f.now);if e!=nil||r.Scanned!=0||!r.Complete{t.Fatal("empty bound",r,e)}
  old:=f.now.Add(-72*time.Hour).Format(time.RFC3339Nano)
  for index,id:=range []string{"a","z"}{if _,e=f.db.Exec(`INSERT INTO conversation_activities(id,conversation_id,turn_id,sequence,kind,status,created_at,updated_at,branch_id)VALUES(?,?,?,?,'command','completed',?,?,?)`,id,f.conv,"terminal-turn",index+1,old,old,f.branch);e!=nil{t.Fatal(e)}}
  activityEnd:="a";activity:=f.request("gc:closed-activity");activity.EndCursor=&activityEnd
- r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),activity,o,f.now);if e!=nil||r.Scanned!=1||r.Deleted!=1||!r.Complete{t.Fatalf("bounded activity %+v %v",r,e)}
+ r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),activity,o,f.now);if e!=nil||r.Scanned!=1||r.Deleted!=1||r.Complete{t.Fatalf("bounded activity %+v %v",r,e)}
  var watermark int;f.db.QueryRow(`SELECT count(*) FROM conversation_activities WHERE id='z'`).Scan(&watermark);if watermark!=1{t.Fatal("sequence anchor beyond bound lost")}
  if _,e=f.db.Exec(`DELETE FROM ao_history_retention`);e!=nil{t.Fatal(e)}
  for _,id:=range []string{"a","b","z"}{if _,e=f.db.Exec(`INSERT INTO ao_history_retention VALUES('message',?,?,'','',0,'',?,?,'[]')`,id,f.conv,old,old);e!=nil{t.Fatal(e)}}
  end:=`["message","b"]`;audit:=f.request("gc:audit");audit.EndCursor=&end
- r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),audit,o,f.now);if e!=nil||r.Scanned!=2||r.Deleted!=2||!r.Complete{t.Fatalf("bounded stable tuple %+v %v",r,e)}
+ r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),audit,o,f.now);if e!=nil||r.Scanned!=2||r.Deleted!=2||r.Complete{t.Fatalf("bounded stable tuple %+v %v",r,e)}
  if _,e=f.db.Exec(`INSERT INTO ao_history_retention VALUES('message','zz',?,'','',0,'',?,?,'[]')`,f.conv,old,old);e!=nil{t.Fatal(e)}
  audit.Cursor=r.NextCursor;r,e=f.s.MaintainHistorySnapshotBatch(context.Background(),audit,o,f.now);if e!=nil||r.Scanned!=0||!r.Complete{t.Fatal("audit chased new key",r,e)}
 }
