@@ -20,6 +20,8 @@ import (
 type HistoryMaintenanceRequest struct {
  OfflineCoverageBefore time.Time `json:"-"`
  OfflineMaxEventID int64 `json:"-"`
+ EndEventID *int64 `json:"end_event_id,omitempty"`
+ EndCursor *string `json:"end_cursor,omitempty"`
 	Stage          string `json:"stage"`
 	Cursor         string `json:"cursor"`
 	Cutoff         string `json:"cutoff"`
@@ -214,6 +216,8 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 	if err = o.Validate(); err != nil {
 		return result, err
 	}
+ if req.EndEventID!=nil&&(*req.EndEventID<0||(req.Stage!="gc:raw"&&req.Stage!="cache:raw"&&req.Stage!="gc:closed-raw")){return result,errors.New("invalid event pass bound")}
+ if req.EndCursor!=nil&&(req.Stage!="gc:activity"&&req.Stage!="gc:closed-activity"&&req.Stage!="gc:audit"){return result,errors.New("invalid text pass bound")}
 	if req.BatchRows < 0 || req.BatchBytes < 0 || req.MaxRowBytes < 0 || req.ReadBudgetNS < 0 || req.WriteBudgetNS < 0 {
 		return result, errors.New("invalid request limits")
 	}
@@ -288,7 +292,7 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
         var ids []any
         if req.Stage=="gc:audit" {
             result.Phase="read_candidates"
-            ids,err=historyGCAuditKeys(readCtx,readTx,req.Cursor,o.BatchRows)
+            ids,err=historyGCAuditKeys(readCtx,readTx,req.Cursor,o.BatchRows,req.EndCursor)
             if err!=nil{return}
         } else {
 		var numeric bool
@@ -310,7 +314,12 @@ func (s *Store) maintainHistoryBatchAt(ctx context.Context, req HistoryMaintenan
 			}
 		}
 		result.Phase = "read_candidates"
-		rows, e := readTx.QueryContext(readCtx, `SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>? ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`, cursor, o.BatchRows)
+		query:=`SELECT `+maintenanceQuoted(key)+` FROM `+maintenanceQuoted(stage.table)+` WHERE `+maintenanceQuoted(key)+`>?`
+        args:=[]any{cursor}
+        if req.EndEventID!=nil{query+=` AND `+maintenanceQuoted(key)+`<=?`;args=append(args,*req.EndEventID)}
+        if req.EndCursor!=nil{query+=` AND `+maintenanceQuoted(key)+`<=?`;args=append(args,*req.EndCursor)}
+        query+=` ORDER BY `+maintenanceQuoted(key)+` LIMIT ?`;args=append(args,o.BatchRows)
+        rows, e := readTx.QueryContext(readCtx,query,args...)
 		if e != nil {
 			err = e
 			return

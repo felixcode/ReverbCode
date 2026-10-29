@@ -168,6 +168,7 @@ func StartWithPageReclaim(path string, s *store.Store, o store.HistoryMaintenanc
  cap["closedOwnerRetentionHours"]=o.ClosedOwnerRetention.Hours();if o.ClosedOwnerRetention==0{cap["closedOwnerRetentionHours"]=float64(48)}
  cap["closedOwnerGC"] = s.ClosedOwnerMaintenanceConfigured()
 		cap["writeBudgetMS"] = o.WriteBudget.Milliseconds()
+        if bounds,e:=s.HistoryMaintenancePassBounds(ctx);e==nil{cap["passBounds"]=bounds}
 		if reclaim == nil {
 			cap["pageReclaim"] = map[string]any{"configured": false, "supported": false, "reason": "invalid_reclaim_configuration"}
 		} else {
