@@ -1,0 +1,591 @@
+package sessionmanager
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+)
+
+type fixedBrowserCapability string
+
+func (f fixedBrowserCapability) Issue(_ domain.SessionID) (string, string, error) {
+	return string(f), "verifier-1", nil
+}
+
+type browserCapabilityIssue struct {
+	token    string
+	verifier string
+	err      error
+}
+
+type scriptedBrowserCapabilities struct {
+	issues  []browserCapabilityIssue
+	calls   int
+	onIssue func(call int, id domain.SessionID)
+}
+
+func (s *scriptedBrowserCapabilities) Issue(id domain.SessionID) (string, string, error) {
+	call := s.calls
+	s.calls++
+	if s.onIssue != nil {
+		s.onIssue(call, id)
+	}
+	if call >= len(s.issues) {
+		return "", "", errors.New("unexpected browser capability issuance")
+	}
+	issue := s.issues[call]
+	return issue.token, issue.verifier, issue.err
+}
+
+func TestSpawnEnvProjectVarsCannotOverrideInternal(t *testing.T) {
+	env := spawnEnv("mer-1", "mer", "issue-9", "/data", map[string]string{
+		"FOO":        "bar",
+		EnvSessionID: "hacked", // a project must not override AO-internal vars
+		EnvProjectID: "hacked",
+	})
+	if env["FOO"] != "bar" {
+		t.Fatalf("FOO = %q, want bar", env["FOO"])
+	}
+	if env[EnvSessionID] != "mer-1" {
+		t.Fatalf("AO_SESSION_ID = %q, want mer-1 (internal wins)", env[EnvSessionID])
+	}
+	if env[EnvProjectID] != "mer" {
+		t.Fatalf("AO_PROJECT_ID = %q, want mer (internal wins)", env[EnvProjectID])
+	}
+}
+
+func TestSpawnEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) {
+	env := spawnEnvForOS("mer-1", "mer", "issue-9", `C:\ao`, map[string]string{
+		"ao_session_id": "hacked",
+		"buildMode":     "production",
+	}, true)
+	if _, ok := env["ao_session_id"]; ok {
+		t.Fatal("case variant of protected AO_SESSION_ID survived")
+	}
+	if env[EnvSessionID] != "mer-1" || env["buildMode"] != "production" {
+		t.Fatalf("environment = %v, want protected ID and untouched project variable spelling", env)
+	}
+}
+
+func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
+	manager := &Manager{
+		dataDir:             "/data",
+		browserCapabilities: fixedBrowserCapability("capability-1"),
+		executable:          func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env, verifier, err := manager.launchRuntimeEnv("mer-1", "mer", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env[EnvBrowserCapability] != "capability-1" {
+		t.Fatalf("%s = %q", EnvBrowserCapability, env[EnvBrowserCapability])
+	}
+	if verifier != "verifier-1" {
+		t.Fatalf("verifier = %q", verifier)
+	}
+}
+
+func TestRuntimeEnvClearsDaemonBrowserRuntimeSecrets(t *testing.T) {
+	manager := &Manager{
+		dataDir:    "/data",
+		executable: func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		EnvBrowserRuntimeToken:      "runtime-secret",
+		EnvBrowserRuntimeTokenStdin: "1",
+	})
+	if env[EnvBrowserRuntimeToken] != "" || env[EnvBrowserRuntimeTokenStdin] != "" {
+		t.Fatalf("daemon browser runtime credentials leaked to worker: token=%q stdin=%q", env[EnvBrowserRuntimeToken], env[EnvBrowserRuntimeTokenStdin])
+	}
+}
+
+func TestRuntimeEnvWindowsRemovesCaseVariantsOfProtectedVariables(t *testing.T) {
+	daemonRunFile := filepath.Join(t.TempDir(), "daemon-running.json")
+	previous := envKeysCaseInsensitive
+	envKeysCaseInsensitive = true
+	t.Cleanup(func() { envKeysCaseInsensitive = previous })
+
+	manager := &Manager{
+		dataDir:     `C:\ao`,
+		runFilePath: daemonRunFile,
+		executable:  func() (string, error) { return filepath.Join(t.TempDir(), "ao"), nil },
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := manager.runtimeEnv("mer-1", "mer", "issue-9", map[string]string{
+		"Path":                           `C:\project\bin`,
+		"ao_session_id":                  "hacked",
+		"Ao_Project_Id":                  "hacked",
+		"aO_Issue_ID":                    "hacked",
+		"Ao_Data_Dir":                    "hacked",
+		"ao_run_file":                    "hacked",
+		"ao_browser_runtime_token":       "runtime-secret",
+		"ao_browser_runtime_token_stdin": "1",
+		"buildMode":                      "production",
+	})
+
+	for _, key := range []string{
+		"Path",
+		"ao_session_id",
+		"Ao_Project_Id",
+		"aO_Issue_ID",
+		"Ao_Data_Dir",
+		"ao_run_file",
+		"ao_browser_runtime_token",
+		"ao_browser_runtime_token_stdin",
+	} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("case variant %s survived in runtime env: %v", key, env)
+		}
+	}
+	if env["PATH"] == "" {
+		t.Fatalf("PATH was not pinned: %v", env)
+	}
+	if env[EnvSessionID] != "mer-1" || env[EnvProjectID] != "mer" || env[EnvIssueID] != "issue-9" || env[EnvDataDir] != `C:\ao` {
+		t.Fatalf("protected AO env = %v", env)
+	}
+	if env[EnvRunFile] != daemonRunFile || env[EnvBrowserRuntimeToken] != "" || env[EnvBrowserRuntimeTokenStdin] != "" {
+		t.Fatalf("runtime protected env = %v", env)
+	}
+	if env["buildMode"] != "production" {
+		t.Fatalf("project env spelling was not preserved: %v", env)
+	}
+}
+
+func TestRuntimeEnvPinsHooksToDaemonRunFile(t *testing.T) {
+	daemonRunFile := filepath.Join(t.TempDir(), "daemon-running.json")
+	t.Setenv("AO_RUN_FILE", filepath.Join(t.TempDir(), "inherited-wrong-daemon.json"))
+	manager := &Manager{
+		dataDir:     "/data",
+		runFilePath: daemonRunFile,
+		executable:  func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		"AO_RUN_FILE": "/project/cannot-redirect-hooks.json",
+	})
+	if got, want := env["AO_RUN_FILE"], daemonRunFile; got != want {
+		t.Fatalf("AO_RUN_FILE = %q, want daemon run-file %q", got, want)
+	}
+}
+
+func TestHookPATH(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	daemonExe := filepath.Join("/opt", "aod", "ao")
+	daemonDir := filepath.Dir(daemonExe)
+	exeOK := func() (string, error) { return daemonExe, nil }
+
+	cases := []struct {
+		name       string
+		executable func() (string, error)
+		daemonPATH string
+		projectEnv map[string]string
+		want       string
+		wantErr    bool
+	}{
+		{
+			name:       "prepends daemon dir to inherited PATH",
+			executable: exeOK,
+			daemonPATH: "/usr/bin" + sep + "/bin",
+			want:       daemonDir + sep + "/usr/bin" + sep + "/bin",
+		},
+		{
+			name:       "project PATH override is the base",
+			executable: exeOK,
+			daemonPATH: "/usr/bin",
+			projectEnv: map[string]string{"PATH": "/proj/bin"},
+			want:       daemonDir + sep + "/proj/bin",
+		},
+		{
+			name:       "empty base PATH yields the daemon dir alone",
+			executable: exeOK,
+			want:       daemonDir,
+		},
+		{
+			name:       "unresolvable executable fails",
+			executable: func() (string, error) { return "", errors.New("no exe") },
+			daemonPATH: "/usr/bin",
+			wantErr:    true,
+		},
+		{
+			// A daemon binary not named "ao" cannot anchor `ao` resolution by
+			// having its directory prepended, so the pin must be refused.
+			name:       "executable not named ao fails",
+			executable: func() (string, error) { return filepath.Join("/opt", "aod", "ao-daemon"), nil },
+			daemonPATH: "/usr/bin",
+			wantErr:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string {
+				if key == "PATH" {
+					return tc.daemonPATH
+				}
+				return ""
+			}
+			got, err := HookPATH(tc.executable, getenv, tc.projectEnv, "/data")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("HookPATH = %q, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("HookPATH: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("HookPATH = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveHarnessAndAgentConfig(t *testing.T) {
+	cfg := domain.ProjectConfig{
+		AgentConfig:  domain.AgentConfig{Model: "base", Effort: "medium", Mode: "low", Permissions: domain.PermissionModeAuto},
+		Worker:       domain.RoleOverride{Harness: domain.HarnessCodex, AgentConfig: domain.AgentConfig{Model: "worker", Effort: "high", Mode: "high"}},
+		Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+	}
+
+	// Explicit harness always wins.
+	if h := effectiveHarness(domain.HarnessAider, domain.KindWorker, cfg); h != domain.HarnessAider {
+		t.Fatalf("explicit harness = %q, want aider", h)
+	}
+	// Empty harness falls back to the role override per kind.
+	if h := effectiveHarness("", domain.KindWorker, cfg); h != domain.HarnessCodex {
+		t.Fatalf("worker harness = %q, want codex", h)
+	}
+	if h := effectiveHarness("", domain.KindOrchestrator, cfg); h != domain.HarnessClaudeCode {
+		t.Fatalf("orchestrator harness = %q, want claude-code", h)
+	}
+
+	// Role override merges over the base agent config (set fields win; unset keep base).
+	got := effectiveAgentConfig(domain.HarnessCodex, domain.KindWorker, cfg)
+	if got.Model != "worker" || got.Effort != "high" || got.Mode != "high" || got.Permissions != domain.PermissionModeAuto {
+		t.Fatalf("merged worker config = %#v, want model=worker mode=high permissions=auto", got)
+	}
+	// Orchestrator has no agent-config override, so the base config is used as-is.
+	if got := effectiveAgentConfig(domain.HarnessClaudeCode, domain.KindOrchestrator, cfg); got.Model != "base" {
+		t.Fatalf("orchestrator config = %#v, want base", got)
+	}
+	// A launch harness that differs from the role's configured harness drops the
+	// role's model/mode — they were tuned for the other agent — but keeps the
+	// harness-neutral permissions.
+	if got := effectiveAgentConfig(domain.HarnessAider, domain.KindWorker, cfg); got.Model != "base" || got.Mode != "low" || got.Permissions != domain.PermissionModeAuto {
+		t.Fatalf("mismatched-harness worker config = %#v, want model=base mode=low permissions=auto", got)
+	}
+	// A role override with no harness pinned is deliberately treated as
+	// "applies to any harness", so its model/mode are inherited whichever
+	// harness the session launches with. This is a behavior decision, not a
+	// side effect: assert it across two unrelated harnesses so it cannot
+	// silently flip back to the old drop-on-every-switch behavior.
+	unpinned := domain.ProjectConfig{
+		AgentConfig: domain.AgentConfig{Model: "base", Mode: "low"},
+		Worker:      domain.RoleOverride{AgentConfig: domain.AgentConfig{Model: "worker", Mode: "high"}},
+	}
+	for _, harness := range []domain.AgentHarness{domain.HarnessAider, domain.HarnessCodex} {
+		got := effectiveAgentConfig(harness, domain.KindWorker, unpinned)
+		if got.Model != "worker" || got.Mode != "high" {
+			t.Fatalf("unpinned worker config for %q = %#v, want model=worker mode=high", harness, got)
+		}
+	}
+}
+
+type tuningCatalog struct {
+	catalog ports.AgentModelCatalog
+	err     error
+	calls   *int
+}
+
+func (c tuningCatalog) Models(context.Context, string, string, bool) (ports.AgentModelCatalog, error) {
+	if c.calls != nil {
+		*c.calls++
+	}
+	return c.catalog, c.err
+}
+
+func TestResolveChatAgentConfigValidatesAndResetsDependentTuning(t *testing.T) {
+	m := &Manager{modelCatalog: tuningCatalog{catalog: ports.AgentModelCatalog{Models: []ports.AgentModelInfo{
+		{ID: "old", Efforts: []string{"high"}},
+		{ID: "new", Efforts: []string{"low"}},
+	}}}}
+	project := domain.ProjectConfig{Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Model: "old", Effort: "high"}}}
+	resolved, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AgentConfig: ports.AgentConfig{Model: "new"},
+	}, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Model != "new" || resolved.Effort != "" {
+		t.Fatalf("resolved = %#v, want new model with provider defaults", resolved)
+	}
+	resolved, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AgentConfig: ports.AgentConfig{Model: "old"}, EffortOverride: true,
+	}, project)
+	if err != nil || resolved.Effort != "" {
+		t.Fatalf("explicit provider defaults did not clear role tuning: %#v, %v", resolved, err)
+	}
+
+	_, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AgentConfig: ports.AgentConfig{Model: "new", Effort: "high"},
+	}, project)
+	if !errors.Is(err, ports.ErrUnsupportedEffort) {
+		t.Fatalf("error = %v, want ErrUnsupportedEffort", err)
+	}
+
+	resolved, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AgentConfig: ports.AgentConfig{Model: "custom"},
+	}, project)
+	if err != nil || resolved.Model != "custom" || resolved.Effort != "" {
+		t.Fatalf("custom model with provider defaults = %#v, %v", resolved, err)
+	}
+
+	m.modelCatalog = tuningCatalog{err: errors.New("discovery failed")}
+	resolved, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AgentConfig: ports.AgentConfig{Model: "new"},
+	}, domain.ProjectConfig{})
+	if err != nil || resolved.Model != "new" {
+		t.Fatalf("provider defaults should survive discovery failure: %#v, %v", resolved, err)
+	}
+	_, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		AgentConfig: ports.AgentConfig{Model: "new", Effort: "high"},
+	}, domain.ProjectConfig{})
+	if !errors.Is(err, ports.ErrModelCapabilitiesUnavailable) {
+		t.Fatalf("error = %v, want ErrModelCapabilitiesUnavailable", err)
+	}
+}
+
+func TestResolveChatAgentConfigValidatesClaudeEffort(t *testing.T) {
+	catalogCalls := 0
+	m := &Manager{modelCatalog: tuningCatalog{calls: &catalogCalls, catalog: ports.AgentModelCatalog{Models: []ports.AgentModelInfo{
+		{ID: "sonnet", IsDefault: true, Efforts: []string{"high"}},
+	}}}}
+	resolved, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		AgentConfig: ports.AgentConfig{Model: "sonnet", Effort: "high"}, EffortOverride: true,
+	}, domain.ProjectConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Effort != "high" {
+		t.Fatalf("Claude Code effort = %q, want high", resolved.Effort)
+	}
+	if catalogCalls != 1 {
+		t.Fatalf("Claude Code model catalog calls = %d, want 1", catalogCalls)
+	}
+
+	resolved, err = m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		AgentConfig: ports.AgentConfig{Model: "sonnet"}, EffortOverride: true,
+	}, domain.ProjectConfig{Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Effort: "high"}}})
+	if err != nil || resolved.Effort != "" {
+		t.Fatalf("explicit Claude provider default did not clear role tuning: %#v, %v", resolved, err)
+	}
+	if catalogCalls != 2 {
+		t.Fatalf("provider default did not validate the selected model: %d catalog calls", catalogCalls)
+	}
+}
+
+func TestResolveClaudeTUIAgentConfigRejectsUnsupportedEffort(t *testing.T) {
+	m := &Manager{modelCatalog: tuningCatalog{catalog: ports.AgentModelCatalog{Models: []ports.AgentModelInfo{
+		{ID: "sonnet", IsDefault: true, Efforts: []string{"low", "high"}},
+	}}}}
+
+	_, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		RequestedMode:  domain.SessionModeTUI,
+		AgentConfig:    ports.AgentConfig{Model: "sonnet", Effort: "max"},
+		EffortOverride: true,
+	}, domain.ProjectConfig{})
+	if !errors.Is(err, ports.ErrUnsupportedEffort) {
+		t.Fatalf("error = %v, want ErrUnsupportedEffort", err)
+	}
+}
+
+func TestResolveClaudeModelWithoutEffortStillRequiresCatalog(t *testing.T) {
+	m := &Manager{modelCatalog: tuningCatalog{err: errors.New("gateway does not list models")}}
+
+	_, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		AgentConfig: ports.AgentConfig{Model: "provider/model-vNext"},
+	}, domain.ProjectConfig{Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{
+		Model: "sonnet", Effort: "high",
+	}}})
+	if !errors.Is(err, ports.ErrModelCapabilitiesUnavailable) {
+		t.Fatalf("error = %v, want ErrModelCapabilitiesUnavailable", err)
+	}
+}
+
+func TestResolveClaudeModelWithoutEffortRejectsUnknownAndStaleCatalogs(t *testing.T) {
+	cfg := ports.SpawnConfig{
+		ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		RequestedMode: domain.SessionModeTUI, AgentConfig: ports.AgentConfig{Model: "provider/old"},
+	}
+	m := &Manager{modelCatalog: tuningCatalog{catalog: ports.AgentModelCatalog{
+		CustomModelEntry: ports.CustomModelEntryDirect,
+		Models:           []ports.AgentModelInfo{{ID: "provider/current"}},
+	}}}
+	if _, err := m.resolveAgentConfig(context.Background(), cfg, domain.ProjectConfig{}); !errors.Is(err, ErrUnsupportedModel) {
+		t.Fatalf("unknown model error = %v, want ErrUnsupportedModel", err)
+	}
+
+	m.modelCatalog = tuningCatalog{catalog: ports.AgentModelCatalog{
+		CustomModelEntry: ports.CustomModelEntryDirect,
+		Models:           []ports.AgentModelInfo{{ID: "provider/old"}},
+		Stale:            true,
+	}}
+	if _, err := m.resolveAgentConfig(context.Background(), cfg, domain.ProjectConfig{}); !errors.Is(err, ports.ErrModelCapabilitiesUnavailable) {
+		t.Fatalf("stale catalog error = %v, want ErrModelCapabilitiesUnavailable", err)
+	}
+}
+
+func TestApplySymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink creation requires a host privilege outside this unit test")
+	}
+	project := t.TempDir()
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, ".env"), []byte("X=1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A present source is linked; a missing source is skipped, not an error.
+	if err := applySymlinks(project, workspace, []string{".env", "missing.txt"}); err != nil {
+		t.Fatalf("applySymlinks: %v", err)
+	}
+	target := filepath.Join(workspace, ".env")
+	if data, err := os.ReadFile(target); err != nil || string(data) != "X=1" {
+		t.Fatalf("symlinked .env = %q err=%v", data, err)
+	}
+	if _, err := os.Lstat(filepath.Join(workspace, "missing.txt")); !os.IsNotExist(err) {
+		t.Fatal("missing source should not have been linked")
+	}
+}
+
+func TestApplySymlinksRejectsParentTraversal(t *testing.T) {
+	project := t.TempDir()
+	workspace := t.TempDir()
+	// A "..", "/" or "../" segment escapes the project tree and must be refused
+	// before any stat/link runs, so a project config cannot link in arbitrary
+	// host files.
+	for _, bad := range []string{"../escape", "/etc/passwd", "a/../../b", ".."} {
+		if err := applySymlinks(project, workspace, []string{bad}); err == nil {
+			t.Fatalf("applySymlinks(%q) accepted an unsafe path", bad)
+		}
+	}
+}
+
+func TestRunPostCreate(t *testing.T) {
+	workspace := t.TempDir()
+	if err := runPostCreate(context.Background(), workspace, []string{"echo hi > out.txt"}, nil); err != nil {
+		t.Fatalf("runPostCreate: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "out.txt")); err != nil {
+		t.Fatalf("post-create command did not run in workspace: %v", err)
+	}
+	// A failing command surfaces an error.
+	if err := runPostCreate(context.Background(), workspace, []string{"exit 3"}, nil); err == nil {
+		t.Fatal("expected error from failing post-create command")
+	}
+}
+
+func TestRunPostCreateReceivesAndRedactsProjectEnv(t *testing.T) {
+	command := `echo "$PROJECT_TOKEN" && exit 3`
+	if runtime.GOOS == "windows" {
+		command = `echo %PROJECT_TOKEN% && exit /b 3`
+	}
+	secret := "project-secret-123"
+	err := runPostCreate(context.Background(), t.TempDir(), []string{command}, map[string]string{"PROJECT_TOKEN": secret})
+	if err == nil || !strings.Contains(err.Error(), "[REDACTED]") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("postCreate error did not redact project value: %v", err)
+	}
+}
+
+func TestSpawnPermissionPrecedence(t *testing.T) {
+	for _, kind := range []domain.SessionKind{domain.KindWorker, domain.KindOrchestrator} {
+		for _, tc := range []struct {
+			name                    string
+			base, role, spawn, want domain.PermissionMode
+		}{
+			{"unset", "", "", "", domain.PermissionModeAuto},
+			{"project", domain.PermissionModeDefault, "", "", domain.PermissionModeDefault},
+			{"role", domain.PermissionModeAuto, domain.PermissionModeAcceptEdits, "", domain.PermissionModeAcceptEdits},
+			{"spawn", domain.PermissionModeAuto, domain.PermissionModeAcceptEdits, domain.PermissionModeDefault, domain.PermissionModeDefault},
+		} {
+			t.Run(string(kind)+"/"+tc.name, func(t *testing.T) {
+				cfg := domain.ProjectConfig{AgentConfig: domain.AgentConfig{Permissions: tc.base}, Worker: domain.RoleOverride{AgentConfig: domain.AgentConfig{Permissions: tc.role}}, Orchestrator: domain.RoleOverride{AgentConfig: domain.AgentConfig{Permissions: tc.role}}}
+				got := applySpawnAgentConfig(effectiveAgentConfig(domain.HarnessCodex, kind, cfg), domain.AgentConfig{Permissions: tc.spawn})
+				if got.Permissions != tc.want {
+					t.Fatalf("got %q want %q", got.Permissions, tc.want)
+				}
+			})
+		}
+	}
+	if got := effectiveAgentConfig(domain.HarnessCodex, domain.KindWorker, domain.ProjectConfig{}); got.Permissions != "" {
+		t.Fatalf("non-spawn resolution changed: %q", got.Permissions)
+	}
+}
+
+// A configured family alias has no capabilities of its own; it must accept
+// exactly the efforts of the family's newest concrete model.
+func TestResolveClaudeFamilyAliasUsesNewestModelEfforts(t *testing.T) {
+	models := []ports.AgentModelInfo{
+		{ID: "opus", Label: "Opus", IsDefault: true},
+		{ID: "sonnet", Label: "Sonnet"},
+		{ID: "haiku", Label: "Haiku"},
+		{ID: "fable", Label: "Fable"},
+		{ID: "claude-opus-4-1", Label: "Claude Opus 4.1", Efforts: []string{"low", "medium"}},
+		{ID: "claude-opus-5-5", Label: "Claude Opus 5.5", Efforts: []string{"low", "medium", "high", "xhigh", "max"}},
+		{ID: "claude-sonnet-5-5", Label: "Claude Sonnet 5.5", Efforts: []string{"low", "medium", "high"}},
+		{ID: "claude-haiku-4-5-20251001", Label: "Claude Haiku 4.5", Efforts: []string{"low"}},
+		{ID: "claude-fable-5-1", Label: "Claude Fable 5.1", Efforts: []string{"medium", "high", "max"}},
+	}
+	m := &Manager{modelCatalog: tuningCatalog{catalog: ports.AgentModelCatalog{Models: models}}}
+	all := []string{"low", "medium", "high", "xhigh", "max"}
+	cases := map[string][]string{
+		"opus":             {"low", "medium", "high", "xhigh", "max"},
+		"opus[1m]":         nil,
+		"sonnet":           {"low", "medium", "high"},
+		"haiku":            {"low"},
+		"fable":            {"medium", "high", "max"},
+		"claude-opus-5-5":  {"low", "medium", "high", "xhigh", "max"},
+		"claude-opus-4-1":  {"low", "medium"},
+		"claude-fable-5-1": {"medium", "high", "max"},
+	}
+	for model, allowed := range cases {
+		for _, effort := range all {
+			_, err := m.resolveAgentConfig(context.Background(), ports.SpawnConfig{
+				ProjectID: "p", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+				AgentConfig:    ports.AgentConfig{Model: model, Effort: effort},
+				EffortOverride: true,
+			}, domain.ProjectConfig{})
+			want := containsString(allowed, effort)
+			if model == "opus[1m]" {
+				continue // not in catalog: rejected before effort is checked
+			}
+			if want && err != nil {
+				t.Errorf("model %q effort %q: unexpected error %v", model, effort, err)
+			}
+			if !want && !errors.Is(err, ports.ErrUnsupportedEffort) {
+				t.Errorf("model %q effort %q: error = %v, want ErrUnsupportedEffort", model, effort, err)
+			}
+		}
+	}
+}
