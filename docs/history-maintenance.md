@@ -1,0 +1,223 @@
+# Private, daemon-owned history maintenance
+
+This Linux-only interface is optional and is **not** registered on the primary,
+LAN, mobile, browser, or gateway HTTP router. No new network listener is added.
+The normal daemon and persistent-host adoption continue if it is unavailable.
+
+Enable only after review, with `ALBANIA_AO_HISTORY_MAINTENANCE_SOCKET` pointing to
+an operator-provisioned, same-UID, mode-0700 **local** directory. The socket is
+mode 0600; each connection authenticates Linux `SO_PEERCRED` against the daemon
+UID. Origin/Forwarded headers are refused. Symlink ancestors and network-mounted
+paths are refused. Existing socket/file paths are preserved, never blindly
+unlinked. Normal listener close removes its own socket; a stale path after an
+unclean shutdown disables maintenance and emits a safe warning, not a fatal AO
+startup error. The operator must prove a stale socket unused before retiring it.
+
+Example existing user-unit addition (operator action, not automatically applied):
+
+```ini
+[Service]
+EnvironmentFile=-/home/coland/.config/albanews-ao-history-retention.env
+RuntimeDirectory=albanews-ao-maintenance
+RuntimeDirectoryMode=0700
+```
+
+Set the private env's socket to
+`/run/user/1000/albanews-ao-maintenance/ao.sock`. Keep the existing `KillMode=process`
+and persistent host/native data intact. This change does not operate lifecycle,
+resume, send, or provider processes.
+
+## Protocol
+
+- `GET /v1/capability`: schema readiness, protocol 1, PID/process start ticks,
+  database device/inode, retention policy and configured write budget. No path,
+  token, body, SQL, or native prompt is returned.
+- `POST /v1/history/batch`: a typed `stage`, previous confirmed PK `cursor`, UTC
+  `cutoff`, expected database device/inode, and optional lower limits
+  (`batch_rows`, `batch_bytes`, `max_row_bytes`, `read_budget_ns`,
+  `write_budget_ns`). Requests cannot raise daemon ceilings, select arbitrary
+  tables/databases, provide predicates/SQL, or supply replacement text.
+- Stages: `raw`, `outputs`, `message`, `activity`, `turn`, `session`, and bounded
+  builtins `change_log`, `telemetry_event`, `notifications`,
+  `agent_switch_failure_outbox`, `agent_switch_failure_receipts` (prefix `builtin:`).
+- Responses carry only metadata, counts, safe reasons, cursor, and timing. The
+  **private** cursor is necessary for resumption. `ao history-maintenance` prints
+  only a fixed safe projection and cursor SHA, never the original cursor.
+
+Only the compatible live daemon, exact sidecar schema, and supported policy
+schema (191/192) authorize mutation. Public history-retention reader capability
+alone is insufficient to enable this new writer path. A legacy source can still
+be read/previewed without modification by the separate scheduler component.
+
+## Coordination and proof
+
+A separate non-queued single-maintenance admission bounds preparation memory before any DB query. Candidate PK/body reads, strict parsing, transformation, and full marker/fingerprint hashing finish before writer admission. A bounded read-only transaction ties size and body to one snapshot and is closed before writeMu is requested; no read snapshot is held while waiting. Maintenance never queues on
+`writeMu`: an active or already waiting business writer yields a deferred result.
+After admission, pending business writers stop the batch at its next object
+boundary. Each batch releases its single writer connection and token; the
+scheduler yields **outside** that reservation. This is cooperative prioritization,
+not a promise of zero business latency.
+
+A maintenance-only pinned `sql.Conn` temporarily uses fail-fast SQLite busy
+policy. Recovery is registered **before** its first PRAGMA mutation. The prior
+busy policy is restored before returning the connection, or the connection is
+explicitly discarded and reported. Cancellation/failed restoration never leaves
+business writers with maintenance's busy policy. Business timeout/retry/ACK
+settings are unchanged. Cleanup shares the original write deadline rather than
+starting another wait window.
+
+Inside the AO immediate transaction, only small headers/relations are fetched fresh. Exact original-value CAS binds the reader-prepared body (and its raw native proof) to the current record; identity/semantic/revision/branch differences are retained for re-preparation, not marked cleared. Eligibility is rechecked using the same transaction: age with nanoseconds, terminal state,
+queued/running, pending input/approval, session/branch ownership, handoff and
+closed-owner review protections. Unproven/malformed objects are retained.
+No snapshot read or cached Python proof is treated as mutation authorization.
+Content changes and immutable replay fingerprints/markers commit atomically;
+message/activity revisions and original CDC triggers remain in force. IDs,
+branches, client/provider facts, authentication facts and usage ledgers remain.
+Ordinary event projection/ACK/drain/send paths are not changed.
+
+A failed or canceled transaction does not advance the confirmed cursor. A
+commit error or lost response is `unknown`, not a fabricated rollback or success;
+retry uses the same PK prefix and marker/idempotence facts. Successful commits
+remain counted if a subsequent connection restoration requires discard.
+
+`held_ms` measures the SQLite transaction (including rollback). `writer_reserved_ms`
+measures the complete AO writer reservation, including connection acquisition,
+rollback, restoration/discard and close. `wait_ms`, `read_ms` (bounded preparation, including hashing),
+`commit_ms`, maximums and defer counts are separate. JSON parsing cooperatively checks the reader deadline outside the business writer; canonical encoding and hashing also run there. Byte/row limits bound preparation. The writer does not reparse/canonicalize/hash bodies, only SQLite CAS comparisons and fresh small relationship checks. Actual elapsed
+times remain evidence, not hard latency guarantees.
+
+## Settings
+
+The daemon and scheduler consume the same private `ALBANIA_AO_HISTORY_*` settings:
+`RETENTION_HOURS` (47 by default, positive and at most 48), `BATCH_ROWS` (100),
+`BATCH_BYTES` (16777216), `MAX_ROW_BYTES` (8388608), `STATEMENT_SECONDS` (2), and
+`TRANSACTION_SECONDS` (0.25). Invalid/nonfinite/overflow settings disable only the
+optional maintenance interface. CLI/request limits may lower these ceilings.
+The scheduler separately controls total wall time, batch count and yielding.
+
+Maintenance does not execute VACUUM, checkpoint, switch journal modes, replace a
+live DB, clean native transcripts, or touch backups/NFS/cloud storage. Existing
+marker growth and no-body audit rows are reported as costs. Logical body-byte
+reduction, marker estimates, reusable pages, WAL and OS space are distinct.
+A successful PK scan/pass does not prove the maximum-age objective was met.
+
+Rollback: disable the scheduler first. The compatible marker readers remain
+required after any projection redaction; never put an old incompatible binary
+against the already-redacted live database, and never restore a whole old DB over
+current host/queue facts. Root owns rollout, host/native/input proofs and any
+separately controlled physical compaction.
+
+Byte admission uses [SQLite octet_length(column)](https://www.sqlite.org/lang_corefunc.html#octet_length), which obtains TEXT/BLOB byte lengths from record metadata without reading the content. Maintenance requires UTF-8 so the budget and semantic UTF-8 hash units agree. Only fixed necessary stage/lifecycle columns are loaded; another object's unrelated large prompt/diff is not selected for qualification.
+
+The effective maximum row bytes is clamped to the batch byte budget. An oversized first record is retained and reported rather than causing a permanent zero-progress prefix. Outputs use their own projection: unrelated activity summary/detail bodies are not selected or charged as output data. Builtin deletion preparation retains exact bounded original column bytes for CAS; fresh installed janitor predicates remain authoritative in the write transaction.
+
+The writer checks optimized current byte-length metadata before evaluating body CAS. A record that grew between preparation and application is retained without loading the new oversized body for comparison.
+
+## Raw audit cost control
+
+See [raw history audit minimization](operations/raw-history-audit.md) for complete
+inline audit recognition, the separate digest domains, body-less raw handling,
+and the default-preview **new private copy only** audit-fold tool. This does not
+remove projection/replay markers or add a live database migration endpoint.
+
+## Offline rehearsal
+
+The separate [offline history copy cleanup](operations/offline-history-copy.md)
+runner reuses these exact application rules with a historical clock on an
+exclusively new private copy. It adds no daemon route or live cleanup setting,
+and performs no VACUUM or production database replacement.
+
+## Bounded free-page reclamation (2026-10-27)
+
+This source adds a typed private-Unix `POST /v1/history/reclaim` and one-shot
+`ao history-page-reclaim` client. It does not open a network listener, accept
+SQL/paths/tables, start a watcher, change journal/auto-vacuum mode, checkpoint,
+truncate/delete WAL, or run full VACUUM. Installation and hourly-caller wiring
+are separate maintenance steps; this source does not deploy or enable them.
+
+The daemon only reclaims its own identity-bound main database with
+`auto_vacuum=INCREMENTAL` (2). Modes0/1 return unsupported and are never converted;
+low free-page counts return no_work. The caller can only lower MaxPages/time or
+raise the free-page threshold. It uses the existing shared maintenance admission,
+business-priority writer, busy-timeout restoration/discard and COMMIT outcome
+rules. A waiting business writer stops the loop between individual
+`PRAGMA main.incremental_vacuum(1)` steps. All steps share one write deadline;
+rollback/cancellation do not report confirmed pages, and unknown COMMIT remains
+unknown. A step is not a hard physical-I/O limit.
+
+`ALBANIA_AO_HISTORY_RECLAIM_MAX_PAGES` (default16),
+`ALBANIA_AO_HISTORY_RECLAIM_MIN_FREE_PAGES` (default256) and
+`ALBANIA_AO_HISTORY_RECLAIM_TRANSACTION_SECONDS` (default0.25) are tunable.
+Read/write limits never exceed existing history-maintenance limits. Invalid new
+settings disable only reclaim, leaving existing content maintenance available.
+Example configuration for a future reviewed installation:
+
+```sh
+ALBANIA_AO_HISTORY_RECLAIM_MAX_PAGES=16
+ALBANIA_AO_HISTORY_RECLAIM_MIN_FREE_PAGES=256
+ALBANIA_AO_HISTORY_RECLAIM_TRANSACTION_SECONDS=0.25
+```
+
+The writer's connection-local wal_autocheckpoint is temporarily0 and restored;
+restoration failure discards that connection. This does not change business
+configuration. Because last-writer close/discard can implicitly checkpoint, each
+active reclaim temporarily holds a genuinely readonly `file:` URI connection
+to its own verified main file. It reads main.sqlite_schema and fully drains the
+statement, keeping no snapshot. The guard stays open through writer restoration,
+discard and release, then closes itself. Ordinary AO reader pools are RW and do
+not establish this readonly guarantee.
+
+Modernc v1.51.0 actually reports SQLite3.53.1. Synthetic characterization proves
+transaction commit/rollback/cancel, held-reader WAL behavior, per-connection
+wal_autocheckpoint restore, writer close/discard and final true-RO close/reopen.
+The last true-RO close left main length/SHA unchanged and committed WAL readable.
+A plain path plus `?mode=ro` was experimentally writable; use a proper `file:`
+URI. The initial false-RO fixture failure is preserved, not reclassified.
+SQLite3.53.1 is newer than the [WAL-reset fix](https://www.sqlite.org/wal.html#walresetbug)
+in3.51.3; no dependency upgrade is part of this change.
+
+Result fields distinguish attempted steps, confirmed freelist pages removed,
+logical page-count/byte reduction, main/WAL file lengths and allocated blocks.
+Pointer-map removal may make logical pages exceed freed freelist pages. WAL mode
+may leave the main file unchanged until ordinary later checkpoint activity;
+file/block observations are not attributed OS-space savings. Close/restoration
+and unrelated concurrent I/O cannot be promised to fit a hard250ms total limit.
+Only confirmed transaction counts are accumulated. The client prints a concrete
+typed response and rejects unrecognized nested content.
+
+This frees complete unused pages only. Compacting column bodies need not create
+whole free pages, and raw/event/turn/session metadata still grows. Default16steps
+is conservative, not proven sustainable capacity. The hourly caller must later
+reserve a small configurable budget for reclamation and measure body/row/page/
+DB/WAL trends; neither this endpoint nor auto-vacuum bounds all future storage.
+
+## 2026-11-05 existing offline CLI compatibility
+
+`ao-history-expire` and `ao-raw-cache-maintain` open only an existing,
+identity-bound private database with incremental auto-vacuum. The offline opener
+accepts historical schema 192 or the installed v0.14.8 schema
+20261028124744441, checks the exact retention marker and runtime policy, and
+resolves the protection/maintenance columns without reading a row. Unknown
+versions, missing protection columns and unexpected marker shapes are refused.
+The opener never migrates, creates a database, starts a daemon or changes the
+retention predicates. The caller must first stop all daemon/provider/maintenance
+writers and hold the existing shared maintenance lock.
+
+`ao-history-expire` defaults to a read-only anonymous-stream preview; apply is
+explicit. `ao-raw-cache-maintain` has no preview flag and **always applies** its
+selected stage: `cache:raw`, `gc:activity`, `gc:audit`, `gc:closed-raw`, or
+`gc:closed-activity`. Neither CLI provides all message/turn/session body stages.
+Original input/dedupe facts, pending interactions, Native identities and fee
+ledgers retain their existing protections; closed-history row age stays at least
+48 hours. Coverage maximum event ID and freeze time must come from an actual
+verified recovery point; never invent them to satisfy argument validation.
+
+Only committed batches advance the confirmed cursor and deletion totals. If a
+batch has an unknown commit outcome, first reconcile its bounded PK interval
+from the last confirmed cursor using a read-only connection: compare target row
+existence and the corresponding retention markers/audit state with the batch
+receipt. A missing response alone proves neither rollback nor deletion. Do not
+blindly repeat that batch or count its provisional result as committed work.
+Retain the last confirmed receipt and the separate reconciliation result; an
+unresolved range remains unknown until the application identity/idempotence
+facts establish a safe continuation.

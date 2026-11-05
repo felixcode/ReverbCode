@@ -1,0 +1,61 @@
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The legacy v1 action scans both sides of base...HEAD for PRs and every
+      # fetched ref for pushes. Build the range here so each run checks only the
+      # commits introduced by that PR or push.
+      - name: Select commits to scan
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          commits_file=".git/gitleaks-commits.txt"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            git rev-list --right-only --cherry-pick \
+              "refs/remotes/origin/${GITHUB_BASE_REF}...HEAD" > "${commits_file}"
+          elif [[ -n "${BEFORE_SHA}" && ! "${BEFORE_SHA}" =~ ^0+$ ]] && \
+            git cat-file -e "${BEFORE_SHA}^{commit}"; then
+            git rev-list "${BEFORE_SHA}..${GITHUB_SHA}" > "${commits_file}"
+          else
+            printf '%s\n' "${GITHUB_SHA}" > "${commits_file}"
+          fi
+          echo "Scanning $(wc -l < "${commits_file}") commit(s)"
+
+      # Keep the license-free v7.4 scanner, but avoid Docker Hub pull limits.
+      - name: Install pinned gitleaks
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/gitleaks/gitleaks/releases/download/v7.4.0/gitleaks-linux-amd64 \
+            --output "${RUNNER_TEMP}/gitleaks"
+          echo "97019efe504f729cc2f73fb467784448af22909d3ad58ade57665e97254c64a3  ${RUNNER_TEMP}/gitleaks" | sha256sum --check
+          chmod +x "${RUNNER_TEMP}/gitleaks"
+
+      - name: Scan selected commits for secrets
+        shell: bash
+        run: |
+          "${RUNNER_TEMP}/gitleaks" \
+            --path="${GITHUB_WORKSPACE}" \
+            --verbose \
+            --redact \
+            --commits-file="${GITHUB_WORKSPACE}/.git/gitleaks-commits.txt" \
+            --config-path="${GITHUB_WORKSPACE}/.github/.gitleaks.toml"
