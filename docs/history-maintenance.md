@@ -221,3 +221,12 @@ blindly repeat that batch or count its provisional result as committed work.
 Retain the last confirmed receipt and the separate reconciliation result; an
 unresolved range remains unknown until the application identity/idempotence
 facts establish a safe continuation.
+
+`ao-history-expire --cache-mib` defaults to 128 MiB (allowed 1–1024), using
+the existing offline writer connection cache option. It does not change the
+daemon or reader policy. On incremental-reclaim failure the private progress
+receipt preserves `reclaim_failed_result`, the fixed `error_type`, SQLite integer
+code and `reclaim_commit_state`; `reclaim_last` remains the last successful
+result. Completed logical-scan counts/cursor stay intact. Raw SQLite errors and
+body contents are never printed. A failed physical batch does not require
+replaying an already completed full logical scan.

@@ -22,7 +22,7 @@ func run() int {
 	var dir, report, lock, cutoffText, coverageText string
 	var dev, ino uint64
 	var maxID int64
-	var rows, checkpointEvery, maxBatches int
+	var rows, checkpointEvery, maxBatches, cacheMiB int
 	var apply bool
 	var wall, batch, reclaim time.Duration
 	var pages int64
@@ -35,6 +35,7 @@ func run() int {
 	flag.Uint64Var(&ino, "database-inode", 0, "expected inode")
 	flag.Int64Var(&maxID, "backup-max-event-id", 0, "verified pre-restart CPE upper bound")
 	flag.IntVar(&rows, "batch-rows", 1000, "bounded rows per transaction")
+	flag.IntVar(&cacheMiB, "cache-mib", 128, "offline writer connection page cache MiB")
 	flag.BoolVar(&apply, "apply", false, "actually delete; default readonly preview")
 	flag.DurationVar(&wall, "wall-budget", 2*time.Hour, "total maintenance budget")
 	flag.DurationVar(&batch, "batch-budget", 10*time.Second, "one transaction ceiling")
@@ -48,7 +49,7 @@ func run() int {
 		return fail("invalid_cutoff")
 	}
 	freeze, e := time.Parse(time.RFC3339Nano, coverageText)
-	if e != nil || dir == "" || report == "" || lock == "" || dev == 0 || ino == 0 || maxID <= 0 || rows <= 0 || rows > 10000 || checkpointEvery <= 0 || wall <= 0 || batch <= 0 || pages <= 0 || reclaim <= 0 || cutoff.After(time.Now().UTC().Add(-48*time.Hour)) || freeze.After(time.Now().UTC()) {
+	if e != nil || dir == "" || report == "" || lock == "" || dev == 0 || ino == 0 || maxID <= 0 || cacheMiB < 1 || cacheMiB > 1024 || rows <= 0 || rows > 10000 || checkpointEvery <= 0 || wall <= 0 || batch <= 0 || pages <= 0 || reclaim <= 0 || cutoff.After(time.Now().UTC().Add(-48*time.Hour)) || freeze.After(time.Now().UTC()) {
 		return fail("invalid_options")
 	}
 	if !apply && maxBatches == 0 {
@@ -70,12 +71,12 @@ func run() int {
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
-	s, e := aosqlite.OpenHistoryGCExisting(ctx, dir, dev, ino, apply)
+	s, e := aosqlite.OpenHistoryGCExisting(ctx, dir, dev, ino, apply, cacheMiB)
 	if e != nil {
 		return fail("open_existing_failed")
 	}
 	defer s.Close()
-	state := map[string]any{"status": "running", "stage": "delete_anonymous_stream", "apply": apply, "scanned": int64(0), "deleted": int64(0), "audit_deleted": int64(0), "retained": map[string]int{}, "confirmed_cursor": int64(0), "backup_max_event_id": maxID, "cutoff": cutoffText, "backup_frozen_at": coverageText}
+	state := map[string]any{"status": "running", "stage": "delete_anonymous_stream", "apply": apply, "offline_writer_cache_mib": cacheMiB, "scanned": int64(0), "deleted": int64(0), "audit_deleted": int64(0), "retained": map[string]int{}, "confirmed_cursor": int64(0), "backup_max_event_id": maxID, "cutoff": cutoffText, "backup_frozen_at": coverageText}
 	initialInfo, _ := os.Stat(filepath.Join(dir, "ao.db"))
 	initialBytes := initialInfo.Size()
 	save := func() error {
@@ -174,6 +175,10 @@ func run() int {
 			if x != nil {
 				state["status"] = "failed"
 				state["error"] = "reclaim_failed"
+				state["reclaim_failed_result"] = r
+				state["error_type"] = r.ErrorType
+				state["sqlite_code"] = r.SQLiteCode
+				state["reclaim_commit_state"] = r.CommitState
 				save()
 				return fail("reclaim_failed")
 			}
